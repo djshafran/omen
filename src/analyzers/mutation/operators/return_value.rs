@@ -85,6 +85,7 @@ fn get_return_node_types(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["return"],
         Language::Php => &["return_statement"],
         Language::Bash => &["return_statement"],
+        Language::Gherkin => &[],
     }
 }
 
@@ -375,6 +376,9 @@ fn generate_default_replacements(original: &str, lang: Language) -> Vec<String> 
         Language::Bash => {
             replacements.push("return 0".to_string());
             replacements.push("return 1".to_string());
+        }
+        Language::Gherkin => {
+            // Gherkin does not have return statements.
         }
     }
 

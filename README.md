@@ -800,6 +800,7 @@ Omen includes a Model Context Protocol (MCP) server that exposes all analyzers a
 - `score` - Composite health score (0-100)
 - `semantic_search` - Natural language code search
 - `semantic_search_hyde` - HyDE-style search (query with a hypothetical code snippet)
+- `bdd_coverage` - Gherkin scenario/step ↔ Python step-definition coverage + optional execution report correlation
 
 Each tool includes detailed descriptions with interpretation guidance, helping LLMs understand what metrics mean and when to use each analyzer.
 
@@ -818,7 +819,7 @@ Tool outputs default to [TOON (Token-Oriented Object Notation)](https://github.c
 
 ## Supported Languages
 
-Go, Rust, Python, TypeScript, JavaScript, TSX/JSX, Java, C, C++, C#, Ruby, PHP, Bash (and other languages supported by tree-sitter)
+Go, Rust, Python, TypeScript, JavaScript, TSX/JSX, Java, C, C++, C#, Ruby, PHP, Bash, Gherkin (and other languages supported by tree-sitter)
 
 ## Installation
 
@@ -1065,6 +1066,16 @@ Once configured, you can ask Claude:
 - "What are the hotspot files that need refactoring?"
 - "Show me the bus factor risk for this project"
 - "Find stale feature flags that should be removed"
+- "Show BDD coverage for all scenarios and find missing steps"
+
+### BDD Coverage Guide
+
+Omen exposes BDD coverage through both CLI and MCP:
+
+- CLI: `omen bdd-coverage`
+- MCP tool: `bdd_coverage`
+
+See [`docs/bdd-coverage.md`](docs/bdd-coverage.md) for complete examples and output schema.
 
 ## Claude Code Plugin
 

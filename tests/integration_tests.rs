@@ -306,6 +306,368 @@ fn test_complexity_typescript_fixture() {
 }
 
 #[test]
+fn test_bdd_coverage_runs_successfully() {
+    let output = omen()
+        .args([
+            "-p",
+            fixtures_dir(),
+            "-f",
+            "json",
+            "bdd-coverage",
+            "-g",
+            "*.feature",
+        ])
+        .output()
+        .expect("command runs");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bdd-coverage output should be valid JSON");
+
+    let summary = parsed["summary"].as_object().expect("summary should exist");
+    assert_eq!(summary["steps_total"].as_u64(), Some(6));
+    assert_eq!(summary["steps_missing"].as_u64(), Some(0));
+    assert_eq!(summary["steps_ambiguous"].as_u64(), Some(0));
+    assert_eq!(summary["scenarios_total"].as_u64(), Some(2));
+    assert_eq!(summary["scenarios_fully_implemented"].as_u64(), Some(2));
+}
+
+#[test]
+fn test_bdd_coverage_reports_missing_and_orphan_steps() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    std::fs::write(
+        temp_dir.path().join("features.feature"),
+        r#"Feature: Demo
+  Scenario: Missing step
+    Given configured account
+    When user triggers action
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        temp_dir.path().join("steps.py"),
+        r#"from behave import given, when, then
+
+@given("configured account")
+def configured_account(context): 
+    pass
+
+@then("unused verification")
+def unused_verification(context): 
+    pass
+"#,
+    )
+    .unwrap();
+
+    let output = omen()
+        .args([
+            "-p",
+            temp_dir.path().to_str().unwrap(),
+            "-f",
+            "json",
+            "bdd-coverage",
+        ])
+        .output()
+        .expect("command runs");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bdd-coverage output should be valid JSON");
+
+    let summary = parsed["summary"].as_object().expect("summary should exist");
+    assert_eq!(summary["steps_total"].as_u64(), Some(2));
+    assert_eq!(summary["steps_missing"].as_u64(), Some(1));
+    assert_eq!(summary["scenarios_with_missing_steps"].as_u64(), Some(1));
+    let orphans = parsed["orphan_step_definitions"]
+        .as_array()
+        .expect("orphan_step_definitions should be an array");
+    assert_eq!(orphans.len(), 1);
+}
+
+#[test]
+fn test_bdd_coverage_execution_report_marks_statuses() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    std::fs::write(
+        temp_dir.path().join("features.feature"),
+        r#"Feature: Checkout
+  Scenario: Login
+    Given user has an account
+    When user submits valid credentials
+    Then dashboard is visible
+
+  Scenario: Add product to cart
+    Given product "Widget" exists
+    When user adds "Widget" to cart
+    Then cart contains "Widget"
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        temp_dir.path().join("steps.py"),
+        r#"from behave import given, when, then, parsers
+
+@given("user has an account")
+def user_has_account(context): 
+    pass
+
+@when("user submits valid credentials")
+def user_submits_credentials(context): 
+    pass
+
+@then("dashboard is visible")
+def dashboard_is_visible(context): 
+    pass
+
+@given(parsers.parse('product "{product}" exists'))
+def product_exists(context, product): 
+    pass
+
+@when(parsers.parse('user adds "{product}" to cart'))
+def add_to_cart(context, product): 
+    pass
+
+@then(parsers.parse('cart contains "{product}"'))
+def cart_contains(context, product): 
+    pass
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        temp_dir.path().join("execution.json"),
+        r#"{
+  "scenarios": [
+    {
+      "name": "Login",
+      "line": 2,
+      "status": "passed",
+      "steps": [
+        {
+          "text": "user has an account",
+          "keyword": "Given",
+          "line": 3,
+          "status": "passed"
+        },
+        {
+          "text": "user submits valid credentials",
+          "keyword": "When",
+          "line": 4,
+          "status": "passed"
+        },
+        {
+          "text": "dashboard is visible",
+          "keyword": "Then",
+          "line": 5,
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "name": "Add product to cart",
+      "line": 7,
+      "status": "failed",
+      "steps": [
+        {
+          "text": "product \"Widget\" exists",
+          "keyword": "Given",
+          "line": 8,
+          "status": "passed"
+        },
+        {
+          "text": "user adds \"Widget\" to cart",
+          "keyword": "When",
+          "line": 9,
+          "status": "failed"
+        },
+        {
+          "text": "cart contains \"Widget\"",
+          "keyword": "Then",
+          "line": 10,
+          "status": "skipped"
+        }
+      ]
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let output = omen()
+        .args([
+            "-p",
+            temp_dir.path().to_str().unwrap(),
+            "-f",
+            "json",
+            "bdd-coverage",
+            "-r",
+            "execution.json",
+            "--report-format",
+            "json",
+        ])
+        .output()
+        .expect("command runs");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bdd-coverage output should be valid JSON");
+
+    let summary = parsed["summary"].as_object().expect("summary should exist");
+    assert_eq!(summary["scenarios_total"].as_u64(), Some(2));
+    assert_eq!(summary["scenarios_executed"].as_u64(), Some(2));
+    assert_eq!(summary["scenarios_passed"].as_u64(), Some(1));
+    assert_eq!(summary["scenarios_failed"].as_u64(), Some(1));
+    assert_eq!(summary["steps_total"].as_u64(), Some(6));
+    assert_eq!(summary["steps_executed"].as_u64(), Some(6));
+    assert_eq!(summary["steps_failed"].as_u64(), Some(1));
+
+    let scenarios = parsed["scenarios"]
+        .as_array()
+        .expect("scenarios should be array");
+    assert_eq!(scenarios.len(), 2);
+    assert_eq!(
+        scenarios[0]["execution_status"],
+        serde_json::json!("passed")
+    );
+    assert_eq!(
+        scenarios[1]["execution_status"],
+        serde_json::json!("failed")
+    );
+    assert_eq!(
+        scenarios[1]["steps"][1]["execution_status"],
+        serde_json::json!("failed")
+    );
+    assert_eq!(
+        scenarios[0]["steps"][0]["executed"],
+        serde_json::json!(true)
+    );
+}
+
+#[test]
+fn test_bdd_coverage_execution_report_xml_marks_statuses() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    std::fs::write(
+        temp_dir.path().join("features.feature"),
+        r#"Feature: Checkout
+  Scenario: Login
+    Given user has an account
+    When user submits valid credentials
+    Then dashboard is visible
+
+  Scenario: Failed checkout
+    Given user has an account
+    When user submits invalid credentials
+    Then error is shown
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        temp_dir.path().join("steps.py"),
+        r#"from behave import given, when, then, parsers
+
+@given("user has an account")
+def user_has_account(context):
+    pass
+
+@when("user submits valid credentials")
+def user_submits_credentials(context):
+    pass
+
+@then("dashboard is visible")
+def dashboard_is_visible(context):
+    pass
+
+@when("user submits invalid credentials")
+def user_submits_invalid_credentials(context):
+    pass
+
+@then("error is shown")
+def error_is_shown(context):
+    pass
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        temp_dir.path().join("execution.xml"),
+        r#"<?xml version="1.0"?>
+<testsuite name="bdd" tests="2">
+  <testcase name="Login" line="2" status="passed">
+    <system-out>Given user has an account
+When user submits valid credentials
+Then dashboard is visible</system-out>
+  </testcase>
+  <testcase name="Failed checkout" line="7" status="failed">
+    <failure>
+Then error is shown
+    </failure>
+    <system-out>Given user has an account
+When user submits invalid credentials
+Then error is shown</system-out>
+  </testcase>
+</testsuite>"#,
+    )
+    .unwrap();
+
+    let output = omen()
+        .args([
+            "-p",
+            temp_dir.path().to_str().unwrap(),
+            "-f",
+            "json",
+            "bdd-coverage",
+            "-r",
+            "execution.xml",
+            "--report-format",
+            "xml",
+        ])
+        .output()
+        .expect("command runs");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bdd-coverage output should be valid JSON");
+
+    let summary = parsed["summary"].as_object().expect("summary should exist");
+    assert_eq!(summary["scenarios_total"].as_u64(), Some(2));
+    assert_eq!(summary["scenarios_executed"].as_u64(), Some(2));
+    assert_eq!(summary["scenarios_passed"].as_u64(), Some(1));
+    assert_eq!(summary["scenarios_failed"].as_u64(), Some(1));
+    assert_eq!(summary["steps_executed"].as_u64(), Some(6));
+    assert_eq!(summary["steps_failed"].as_u64(), Some(1));
+
+    let scenarios = parsed["scenarios"]
+        .as_array()
+        .expect("scenarios should be array");
+    assert_eq!(scenarios.len(), 2);
+    assert_eq!(
+        scenarios[0]["execution_status"],
+        serde_json::json!("passed")
+    );
+    assert_eq!(
+        scenarios[1]["execution_status"],
+        serde_json::json!("failed")
+    );
+    assert_eq!(
+        scenarios[1]["steps"][2]["execution_status"],
+        serde_json::json!("failed")
+    );
+}
+
+#[test]
 fn test_satd_detects_todo_in_python() {
     let output = omen()
         .args(["-p", fixtures_dir(), "-f", "json", "satd", "-g", "*.py"])

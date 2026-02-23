@@ -82,6 +82,7 @@ fn is_comment_line(line: &str, lang: Language) -> bool {
         Language::Python | Language::Ruby | Language::Bash => {
             line.starts_with('#') || line.starts_with("'''") || line.starts_with("\"\"\"")
         }
+        Language::Gherkin => line.starts_with('#'),
     }
 }
 

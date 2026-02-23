@@ -6,7 +6,7 @@
 //!
 //! # Supported Languages
 //!
-//! Go, Rust, Python, TypeScript, JavaScript, TSX/JSX, Java, C, C++, C#, Ruby, PHP, Bash
+//! Go, Rust, Python, TypeScript, JavaScript, TSX/JSX, Java, C, C++, C#, Ruby, PHP, Bash, Gherkin
 //!
 //! # Example
 //!

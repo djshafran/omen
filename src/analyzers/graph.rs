@@ -61,6 +61,8 @@ struct FilePathIndex {
     by_stem: HashMap<String, Vec<String>>,
     /// File name (with extension) -> list of relative paths.
     by_name: HashMap<String, Vec<String>>,
+    /// Python module name (dotted) -> list of relative paths.
+    by_python_module: HashMap<String, Vec<String>>,
     /// Normalized path segments for partial matching.
     by_segments: HashMap<String, Vec<String>>,
 }
@@ -70,6 +72,7 @@ impl FilePathIndex {
         let mut by_full_path = HashMap::with_capacity(files.len());
         let mut by_stem: HashMap<String, Vec<String>> = HashMap::new();
         let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_python_module: HashMap<String, Vec<String>> = HashMap::new();
         let mut by_segments: HashMap<String, Vec<String>> = HashMap::new();
 
         for file in files {
@@ -102,12 +105,32 @@ impl FilePathIndex {
                         .push(rel_str.clone());
                 }
             }
+
+            // Python dotted module lookup for absolute and relative-style absolute forms.
+            if rel
+                .extension()
+                .is_some_and(|ext| ext == "py" || ext == "pyi")
+            {
+                let Some(file_stem) = rel.file_stem() else {
+                    continue;
+                };
+                let file_stem = file_stem.to_string_lossy().to_string();
+                for module in python_module_keys_for_file(rel, &file_stem) {
+                    if !module.is_empty() {
+                        by_python_module
+                            .entry(module)
+                            .or_default()
+                            .push(rel_str.clone());
+                    }
+                }
+            }
         }
 
         Self {
             by_full_path,
             by_stem,
             by_name,
+            by_python_module,
             by_segments,
         }
     }
@@ -203,7 +226,7 @@ impl FilePathIndex {
 
                 // Try exact match with common extensions
                 for ext in &[
-                    "", ".rs", ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".java",
+                    "", ".rs", ".go", ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".java",
                 ] {
                     let with_ext = if ext.is_empty() {
                         normalized.clone()
@@ -225,6 +248,23 @@ impl FilePathIndex {
                         return Some(index_path);
                     }
                 }
+            }
+        }
+
+        // 1b. Handle Python-style relative imports (., .., ...).
+        if import_path.starts_with('.')
+            && !import_path.starts_with("./")
+            && !import_path.starts_with("../")
+        {
+            if let Some(matched) = self.resolve_python_relative_import(import_path, from_file) {
+                return Some(matched);
+            }
+        }
+
+        // 2. Handle Python absolute/module-style imports with dots/underscores.
+        if looks_like_python_module(import_path) {
+            if let Some(module_path) = self.resolve_python_module(import_path, from_file) {
+                return Some(module_path);
             }
         }
 
@@ -305,6 +345,103 @@ impl FilePathIndex {
 
         None
     }
+
+    fn resolve_python_relative_import(
+        &self,
+        import_path: &str,
+        from_file: &Path,
+    ) -> Option<String> {
+        if !import_path.starts_with('.') {
+            return None;
+        }
+
+        let mut dot_count = 0usize;
+        for ch in import_path.chars() {
+            if ch == '.' {
+                dot_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if dot_count == 0 {
+            return None;
+        }
+
+        let mut base = from_file.parent().map(|p| p.to_path_buf())?;
+        let up_levels = dot_count.saturating_sub(1);
+        for _ in 0..up_levels {
+            if !base.pop() {
+                return None;
+            }
+        }
+
+        let remainder = &import_path[dot_count..];
+        let resolved = if remainder.is_empty() {
+            base
+        } else {
+            base.join(remainder.replace('.', "/"))
+        };
+
+        let normalized = normalize_path(&resolved);
+        self.resolve_file_with_extensions(&normalized, &[".py", ".pyi"])
+            .or_else(|| self.resolve_python_module_candidates(&normalized))
+    }
+
+    fn resolve_python_module(&self, import_path: &str, _from_file: &Path) -> Option<String> {
+        let normalized = import_path.trim();
+        if normalized.is_empty() {
+            return None;
+        }
+
+        if let Some(matches) = self.by_python_module.get(normalized) {
+            return pick_best_candidate(matches);
+        }
+
+        if let Some(without_src) = normalized.strip_prefix("src.") {
+            if let Some(matches) = self.by_python_module.get(without_src) {
+                return pick_best_candidate(matches);
+            }
+        }
+
+        if let Some(without_lib) = normalized.strip_prefix("lib.") {
+            if let Some(matches) = self.by_python_module.get(without_lib) {
+                return pick_best_candidate(matches);
+            }
+        }
+
+        let slash_path = normalized.replace('.', "/");
+        self.resolve_file_with_extensions(&slash_path, &[".py", ".pyi"])
+    }
+
+    fn resolve_python_module_candidates(&self, base: &str) -> Option<String> {
+        let module_key = base.replace('/', ".");
+        if let Some(matches) = self.by_python_module.get(&module_key) {
+            return pick_best_candidate(matches);
+        }
+        self.resolve_file_with_extensions(base, &[".py", ".pyi"])
+    }
+
+    fn resolve_file_with_extensions(&self, base_path: &str, extensions: &[&str]) -> Option<String> {
+        for ext in extensions {
+            let candidate = format!("{}{}", base_path, ext);
+            if self.by_full_path.contains_key(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        let init_py = format!("{}/__init__.py", base_path);
+        if self.by_full_path.contains_key(&init_py) {
+            return Some(init_py);
+        }
+
+        let init_pyi = format!("{}/__init__.pyi", base_path);
+        if self.by_full_path.contains_key(&init_pyi) {
+            return Some(init_pyi);
+        }
+
+        None
+    }
 }
 
 /// Convert CamelCase to snake_case for Ruby constant-to-filename resolution.
@@ -331,6 +468,78 @@ fn camel_to_snake(name: &str) -> String {
         }
     }
     result
+}
+
+fn looks_like_python_module(import_path: &str) -> bool {
+    if import_path.is_empty() || import_path.contains('/') || import_path.contains("::") {
+        return false;
+    }
+
+    import_path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+fn pick_best_candidate(matches: &[String]) -> Option<String> {
+    if matches.is_empty() {
+        return None;
+    }
+
+    let mut sorted = matches.to_vec();
+    sorted.sort_by_key(|s| s.len());
+    sorted.into_iter().next()
+}
+
+fn python_module_keys_for_file(file_path: &Path, file_stem: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    for component in file_path.iter() {
+        if let Some(component) = component.to_str() {
+            components.push(component.to_string());
+        }
+    }
+
+    if components.is_empty() {
+        return Vec::new();
+    }
+
+    // Normalize file stem.
+    if let Some(last) = components.last_mut() {
+        *last = file_stem.to_string();
+    }
+
+    let mut keys = Vec::new();
+
+    if file_stem == "__init__" {
+        if components.len() > 1 {
+            components.pop();
+            let package = components.join(".");
+            add_module_variant(&mut keys, &package);
+        }
+    } else {
+        let module = components.join(".");
+        add_module_variant(&mut keys, &module);
+    }
+
+    keys
+}
+
+fn add_module_variant(keys: &mut Vec<String>, module: &str) {
+    if module.is_empty() {
+        return;
+    }
+    if !keys.contains(&module.to_string()) {
+        keys.push(module.to_string());
+    }
+    if let Some(without_src) = module.strip_prefix("src.") {
+        if !keys.contains(&without_src.to_string()) {
+            keys.push(without_src.to_string());
+        }
+    }
+    if let Some(without_lib) = module.strip_prefix("lib.") {
+        if !keys.contains(&without_lib.to_string()) {
+            keys.push(without_lib.to_string());
+        }
+    }
 }
 
 /// Normalize a path by removing . and resolving ..
@@ -1275,6 +1484,60 @@ mod tests {
         assert_eq!(
             index.find_match("utils", Path::new("src/lib.rs")),
             Some("src/utils.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_match_python_absolute_module() {
+        let root = Path::new("/project");
+        let files = vec![
+            std::path::PathBuf::from("/project/src/vivasvan/__init__.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/strategy/__init__.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/strategy/evaluator.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/utils.py"),
+        ];
+        let index = FilePathIndex::new(&files, root);
+
+        assert_eq!(
+            index.find_match("vivasvan", Path::new("src/main.py")),
+            Some("src/vivasvan/__init__.py".to_string())
+        );
+        assert_eq!(
+            index.find_match("vivasvan.utils", Path::new("src/main.py")),
+            Some("src/vivasvan/utils.py".to_string())
+        );
+        assert_eq!(
+            index.find_match("vivasvan.strategy", Path::new("src/main.py")),
+            Some("src/vivasvan/strategy/__init__.py".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_match_python_relative_import() {
+        let root = Path::new("/project");
+        let files = vec![
+            std::path::PathBuf::from("/project/src/vivasvan/strategy/handler.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/strategy/utils.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/shared/logger.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/__init__.py"),
+            std::path::PathBuf::from("/project/src/vivasvan/strategy/__init__.py"),
+        ];
+        let index = FilePathIndex::new(&files, root);
+
+        assert_eq!(
+            index.find_match(".utils", Path::new("src/vivasvan/strategy/handler.py")),
+            Some("src/vivasvan/strategy/utils.py".to_string())
+        );
+        assert_eq!(
+            index.find_match(
+                "..shared.logger",
+                Path::new("src/vivasvan/strategy/handler.py")
+            ),
+            Some("src/vivasvan/shared/logger.py".to_string())
+        );
+        assert_eq!(
+            index.find_match("..", Path::new("src/vivasvan/strategy/handler.py")),
+            Some("src/vivasvan/__init__.py".to_string())
         );
     }
 }

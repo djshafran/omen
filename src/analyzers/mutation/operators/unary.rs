@@ -83,6 +83,7 @@ fn get_unary_expression_types(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["unary"],
         Language::Php => &["unary_op_expression"],
         Language::Bash => &[],
+        Language::Gherkin => &[],
     }
 }
 

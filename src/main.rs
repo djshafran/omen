@@ -12,9 +12,9 @@ use rayon::ThreadPoolBuilder;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use omen::cli::{
-    Cli, Command, ComplexityArgs, McpSubcommand, MutationArgs, MutationSubcommand,
-    MutationTrainArgs, OutputFormat, ReportSubcommand, ScoreArgs, ScoreSubcommand,
-    SearchSubcommand,
+    AnalyzerArgs, BddCoverageArgs, Cli, Command, ComplexityArgs, McpSubcommand, MutationArgs,
+    MutationSubcommand, MutationTrainArgs, OutputFormat, ReportSubcommand, ScoreArgs,
+    ScoreSubcommand, SearchSubcommand,
 };
 use omen::config::Config;
 use omen::core::progress::is_tty;
@@ -135,7 +135,8 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
                             "analyze_temporal_coupling",
                             "analyze_ownership",
                             "analyze_cohesion",
-                            "analyze_repo_map"
+                            "analyze_repo_map",
+                            "analyze_bdd_coverage"
                         ]
                     });
                     println!("{}", serde_json::to_string_pretty(&manifest)?);
@@ -150,7 +151,12 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
             if args.check {
                 run_complexity_check(path, &config, args)?;
             } else {
-                run_analyzer::<omen::analyzers::complexity::Analyzer>(path, &config, format)?;
+                run_analyzer::<omen::analyzers::complexity::Analyzer>(
+                    path,
+                    &config,
+                    format,
+                    Some(&args.common),
+                )?;
             }
         }
         Command::Diff(args) => {
@@ -173,6 +179,9 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
         | Command::Smells(_) => {
             dispatch_analyzer(&cli.command, path, &config, format)?;
         }
+        Command::BddCoverage(args) => {
+            run_bdd_coverage(path, &config, format, args)?;
+        }
         Command::Churn(args) => {
             run_churn_analyzer(path, &config, format, args.days)?;
         }
@@ -185,7 +194,12 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
             if args.stale_days > 0 {
                 config.feature_flags.stale_days = args.stale_days;
             }
-            run_analyzer::<omen::analyzers::flags::Analyzer>(path, &config, format)?;
+            run_analyzer::<omen::analyzers::flags::Analyzer>(
+                path,
+                &config,
+                format,
+                Some(&args.common),
+            )?;
         }
         Command::Score(cmd) => {
             if cmd.args.check {
@@ -264,7 +278,7 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
                         }
                     }
                     None => {
-                        run_analyzer::<omen::score::Analyzer>(path, &config, format)?;
+                        run_analyzer::<omen::score::Analyzer>(path, &config, format, None)?;
                     }
                 }
             }
@@ -310,6 +324,11 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
                         run_and_collect!(&ctx, omen::analyzers::complexity::Analyzer, "complexity"),
                         run_and_collect!(&ctx, omen::analyzers::satd::Analyzer, "satd"),
                         run_and_collect!(&ctx, omen::analyzers::deadcode::Analyzer, "deadcode"),
+                        run_and_collect!(
+                            &ctx,
+                            omen::analyzers::bdd_coverage::Analyzer,
+                            "bdd_coverage"
+                        ),
                         run_and_collect!(&ctx, omen::analyzers::cohesion::Analyzer, "cohesion"),
                         run_and_collect!(&ctx, omen::analyzers::graph::Analyzer, "graph"),
                         run_and_collect!(&ctx, omen::analyzers::repomap::Analyzer, "repomap"),
@@ -333,7 +352,7 @@ fn run_with_path(cli: &Cli, path: &PathBuf) -> omen::core::Result<()> {
                 )
             });
 
-            let mut results: Vec<Value> = Vec::with_capacity(17);
+            let mut results: Vec<Value> = Vec::with_capacity(18);
             results.extend(group_a);
             results.extend(group_b);
 
@@ -403,7 +422,7 @@ fn build_context<'a>(
 }
 
 /// Dispatch a command variant to its corresponding analyzer. This consolidates
-/// the 15 command arms that all follow the same `run_analyzer::<T>` pattern.
+/// the command arms that all follow the same `run_analyzer::<T>` pattern.
 fn dispatch_analyzer(
     command: &Command,
     path: &PathBuf,
@@ -411,46 +430,84 @@ fn dispatch_analyzer(
     format: Format,
 ) -> omen::core::Result<()> {
     match command {
-        Command::Satd(_) => run_analyzer::<omen::analyzers::satd::Analyzer>(path, config, format),
-        Command::Deadcode(_) => {
-            run_analyzer::<omen::analyzers::deadcode::Analyzer>(path, config, format)
+        Command::Satd(args) => {
+            run_analyzer::<omen::analyzers::satd::Analyzer>(path, config, format, Some(args))
         }
-        Command::Clones(_) => {
-            run_analyzer::<omen::analyzers::duplicates::Analyzer>(path, config, format)
+        Command::Deadcode(args) => {
+            run_analyzer::<omen::analyzers::deadcode::Analyzer>(path, config, format, Some(args))
         }
-        Command::Defect(_) => {
-            run_analyzer::<omen::analyzers::defect::Analyzer>(path, config, format)
+        Command::Clones(args) => {
+            run_analyzer::<omen::analyzers::duplicates::Analyzer>(path, config, format, Some(args))
         }
-        Command::Tdg(_) => run_analyzer::<omen::analyzers::tdg::Analyzer>(path, config, format),
-        Command::Graph(_) => run_analyzer::<omen::analyzers::graph::Analyzer>(path, config, format),
-        Command::Hotspot(_) => {
-            run_analyzer::<omen::analyzers::hotspot::Analyzer>(path, config, format)
+        Command::Defect(args) => {
+            run_analyzer::<omen::analyzers::defect::Analyzer>(path, config, format, Some(args))
         }
-        Command::Temporal(_) => {
-            run_analyzer::<omen::analyzers::temporal::Analyzer>(path, config, format)
+        Command::Tdg(args) => {
+            run_analyzer::<omen::analyzers::tdg::Analyzer>(path, config, format, Some(args))
         }
-        Command::Ownership(_) => {
-            run_analyzer::<omen::analyzers::ownership::Analyzer>(path, config, format)
+        Command::Graph(args) => {
+            run_analyzer::<omen::analyzers::graph::Analyzer>(path, config, format, Some(args))
         }
-        Command::Cohesion(_) => {
-            run_analyzer::<omen::analyzers::cohesion::Analyzer>(path, config, format)
+        Command::Hotspot(args) => {
+            run_analyzer::<omen::analyzers::hotspot::Analyzer>(path, config, format, Some(args))
         }
-        Command::Repomap(_) => {
-            run_analyzer::<omen::analyzers::repomap::Analyzer>(path, config, format)
+        Command::Temporal(args) => {
+            run_analyzer::<omen::analyzers::temporal::Analyzer>(path, config, format, Some(args))
         }
-        Command::Smells(_) => {
-            run_analyzer::<omen::analyzers::smells::Analyzer>(path, config, format)
+        Command::Ownership(args) => {
+            run_analyzer::<omen::analyzers::ownership::Analyzer>(path, config, format, Some(args))
+        }
+        Command::Cohesion(args) => {
+            run_analyzer::<omen::analyzers::cohesion::Analyzer>(path, config, format, Some(args))
+        }
+        Command::Repomap(args) => {
+            run_analyzer::<omen::analyzers::repomap::Analyzer>(path, config, format, Some(args))
+        }
+        Command::Smells(args) => {
+            run_analyzer::<omen::analyzers::smells::Analyzer>(path, config, format, Some(args))
         }
         _ => unreachable!("dispatch_analyzer called with non-dispatched command"),
     }
+}
+
+fn run_bdd_coverage(
+    path: &PathBuf,
+    config: &Config,
+    format: Format,
+    args: &BddCoverageArgs,
+) -> omen::core::Result<()> {
+    let analyzer = omen::analyzers::bdd_coverage::Analyzer::default()
+        .with_execution_report(args.execution_report.clone(), args.report_format.clone());
+    run_analyzer_with_instance(path, config, format, Some(&args.common), analyzer)
 }
 
 fn run_analyzer<A: Analyzer + Default>(
     path: &PathBuf,
     config: &Config,
     format: Format,
+    common_args: Option<&AnalyzerArgs>,
 ) -> omen::core::Result<()> {
-    let file_set = FileSet::from_path(path, config)?;
+    let analyzer = A::default();
+    run_analyzer_with_instance(path, config, format, common_args, analyzer)
+}
+
+fn run_analyzer_with_instance<A: Analyzer>(
+    path: &PathBuf,
+    config: &Config,
+    format: Format,
+    common_args: Option<&AnalyzerArgs>,
+    analyzer: A,
+) -> omen::core::Result<()> {
+    let mut file_set = FileSet::from_path(path, config)?;
+
+    if let Some(args) = common_args {
+        if let Some(pattern) = args.glob.as_deref() {
+            file_set = file_set.filter_by_glob(pattern);
+        }
+        if let Some(pattern) = args.exclude.as_deref() {
+            file_set = file_set.exclude_by_glob(pattern);
+        }
+    }
 
     // Show analysis progress
     let spinner = if is_tty() {
@@ -466,7 +523,6 @@ fn run_analyzer<A: Analyzer + Default>(
         None
     };
 
-    let analyzer = A::default();
     if let Some(ref s) = spinner {
         s.set_message(format!("Analyzing {} files...", file_set.len()));
     }

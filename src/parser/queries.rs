@@ -91,6 +91,7 @@ pub fn get_decision_node_types(lang: Language) -> &'static [&'static str] {
             "catch_clause",
             "elseif_clause",
         ],
+        Language::Gherkin => &[],
         Language::Bash => &[
             "if_statement",
             "for_statement",
@@ -160,6 +161,7 @@ pub fn get_nesting_node_types(lang: Language) -> &'static [&'static str] {
             "switch_statement",
             "try_statement",
         ],
+        Language::Gherkin => &[],
         Language::Bash => &[
             "if_statement",
             "for_statement",
@@ -223,6 +225,7 @@ pub fn get_flat_node_types(lang: Language) -> &'static [&'static str] {
             "break_statement",
             "continue_statement",
         ],
+        Language::Gherkin => &[],
         Language::Bash => &["elif_clause", "else_clause"],
     }
 }
@@ -245,6 +248,7 @@ pub fn get_class_node_types(lang: Language) -> &'static [&'static str] {
             "interface_declaration",
             "trait_declaration",
         ],
+        Language::Gherkin => &[],
         Language::Bash => &[],
     }
 }
@@ -264,6 +268,7 @@ pub fn get_binary_expression_types(lang: Language) -> &'static [&'static str] {
         Language::C | Language::Cpp => &["binary_expression"],
         Language::Ruby => &["binary"],
         Language::Php => &["binary_expression"],
+        Language::Gherkin => &[],
         Language::Bash => &["binary_expression"],
     }
 }
@@ -316,11 +321,16 @@ mod tests {
             Language::Cpp,
             Language::Ruby,
             Language::Php,
+            Language::Gherkin,
             Language::Bash,
         ];
         for lang in all_languages {
             let types = get_nesting_node_types(lang);
-            assert!(!types.is_empty(), "{lang} should have nesting node types");
+            if lang == Language::Gherkin {
+                assert!(types.is_empty());
+            } else {
+                assert!(!types.is_empty(), "{lang} should have nesting node types");
+            }
         }
     }
 
@@ -341,11 +351,16 @@ mod tests {
             Language::Cpp,
             Language::Ruby,
             Language::Php,
+            Language::Gherkin,
             Language::Bash,
         ];
         for lang in all_languages {
             let types = get_flat_node_types(lang);
-            assert!(!types.is_empty(), "{lang} should have flat node types");
+            if lang == Language::Gherkin {
+                assert!(types.is_empty());
+            } else {
+                assert!(!types.is_empty(), "{lang} should have flat node types");
+            }
         }
     }
 

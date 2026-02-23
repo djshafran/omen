@@ -486,6 +486,7 @@ fn get_call_node_kinds(lang: Language) -> Vec<&'static str> {
         Language::Ruby => vec!["call", "method_call"],
         Language::Php => vec!["function_call_expression", "method_call_expression"],
         Language::Bash => vec!["command"],
+        Language::Gherkin => vec![],
     }
 }
 

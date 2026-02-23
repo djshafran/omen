@@ -284,6 +284,58 @@ impl McpServer {
                     }
                 },
                 {
+                    "name": "bdd_coverage",
+                    "description": "Map Gherkin scenarios/steps to Python step definitions with optional execution report enrichment (passed/failed/skipped statuses).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File or directory path. Defaults to MCP working directory."},
+                            "execution_report": {
+                                "type": "string",
+                                "description": "Optional behave/pytest-bdd execution report path (JSON/JUnit XML)."
+                            },
+                            "report_format": {
+                                "type": "string",
+                                "description": "Optional execution report format (`json` | `xml`). If omitted, infer by extension."
+                            }
+                        }
+                    },
+                    "outputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "object",
+                                "description": "Coverage and execution counters"
+                            },
+                            "scenarios": {
+                                "type": "array",
+                                "description": "Scenario-level coverage + execution details"
+                            },
+                            "steps": {
+                                "type": "array",
+                                "description": "Flattened step-level coverage + execution details"
+                            },
+                            "step_definitions": {
+                                "type": "array",
+                                "description": "Parsed Python step definitions"
+                            },
+                            "missing_steps": {
+                                "type": "array",
+                                "description": "Steps without matching definitions"
+                            },
+                            "ambiguous_steps": {
+                                "type": "array",
+                                "description": "Steps matching multiple definitions"
+                            },
+                            "orphan_step_definitions": {
+                                "type": "array",
+                                "description": "Definitions not used by any feature step"
+                            }
+                        },
+                        "required": ["summary", "scenarios", "steps"]
+                    }
+                },
+                {
                     "name": "flags",
                     "description": "Find and assess feature flags",
                     "inputSchema": {
@@ -384,6 +436,21 @@ impl McpServer {
             "cohesion" => self.run_analyzer::<crate::analyzers::cohesion::Analyzer>(&ctx),
             "repomap" => self.run_analyzer::<crate::analyzers::repomap::Analyzer>(&ctx),
             "smells" => self.run_analyzer::<crate::analyzers::smells::Analyzer>(&ctx),
+            "bdd_coverage" => {
+                let execution_report = arguments
+                    .get("execution_report")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from);
+                let report_format = arguments
+                    .get("report_format")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                self.run_analyzer_with_instance(
+                    &ctx,
+                    crate::analyzers::bdd_coverage::Analyzer::default()
+                        .with_execution_report(execution_report, report_format),
+                )
+            }
             "flags" => self.run_analyzer::<crate::analyzers::flags::Analyzer>(&ctx),
             "score" => self.run_analyzer::<crate::score::Analyzer>(&ctx),
             "diff" => {
@@ -411,6 +478,14 @@ impl McpServer {
         ctx: &AnalysisContext<'_>,
     ) -> std::result::Result<Value, String> {
         let analyzer = A::default();
+        self.run_analyzer_with_instance(ctx, analyzer)
+    }
+
+    fn run_analyzer_with_instance<A: Analyzer>(
+        &self,
+        ctx: &AnalysisContext<'_>,
+        analyzer: A,
+    ) -> std::result::Result<Value, String> {
         let result = analyzer
             .analyze(ctx)
             .map_err(|e| format!("Analysis failed: {}", e))?;
@@ -837,6 +912,107 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_tool_call_bdd_coverage() {
+        let (server, temp_dir) = create_test_server();
+        std::fs::write(
+            temp_dir.path().join("sample.feature"),
+            "Feature: Checkout\n  Scenario: Login\n    Given user has credentials\n",
+        )
+        .unwrap();
+
+        let params = json!({
+            "name": "bdd_coverage",
+            "arguments": {"path": temp_dir.path().to_str().unwrap()}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "bdd_coverage tool should succeed: {:?}",
+            result.err()
+        );
+        let response = result.unwrap();
+        assert!(response.get("content").is_some());
+    }
+
+    #[test]
+    fn test_handle_tool_call_bdd_coverage_with_execution_report() {
+        let (server, temp_dir) = create_test_server();
+        std::fs::write(
+            temp_dir.path().join("sample.feature"),
+            "Feature: Checkout\n  Scenario: Login\n    Given user has credentials\n    Then user is logged in\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("steps.py"),
+            r#"from behave import given, then
+
+@given("user has credentials")
+def has_credentials(context):
+    pass
+
+@then("user is logged in")
+def logged_in(context):
+    pass
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("execution.json"),
+            r#"{
+  "scenarios": [
+    {
+      "name": "Login",
+      "line": 2,
+      "status": "failed",
+      "steps": [
+        {
+          "text": "user has credentials",
+          "keyword": "Given",
+          "line": 3,
+          "status": "passed"
+        },
+        {
+          "text": "user is logged in",
+          "keyword": "Then",
+          "line": 4,
+          "status": "failed"
+        }
+      ]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let params = json!({
+            "name": "bdd_coverage",
+            "arguments": {
+                "path": temp_dir.path().to_str().unwrap(),
+                "execution_report": "execution.json",
+                "report_format": "json"
+            }
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "bdd_coverage tool with execution report should succeed: {:?}",
+            result.err()
+        );
+        let response = result.unwrap();
+        let content = response
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|first| first.get("text"))
+            .and_then(|t| t.as_str())
+            .expect("tool response content text should exist");
+        let parsed: serde_json::Value =
+            serde_json::from_str(content).expect("bdd_coverage output should be valid JSON");
+        assert_eq!(parsed["summary"]["scenarios_executed"].as_u64(), Some(1));
+        assert_eq!(parsed["summary"]["scenarios_failed"].as_u64(), Some(1));
+        assert_eq!(parsed["summary"]["steps_failed"].as_u64(), Some(1));
+    }
+
+    #[test]
     fn test_handle_request_initialize() {
         let (server, _temp_dir) = create_test_server();
         let request = JsonRpcRequest {
@@ -1085,6 +1261,36 @@ mod tests {
             .iter()
             .any(|t| t.get("name").unwrap() == "semantic_search");
         assert!(has_semantic_search);
+    }
+
+    #[test]
+    fn test_handle_tools_list_has_bdd_coverage() {
+        let (server, _temp_dir) = create_test_server();
+        let result = server.handle_tools_list().unwrap();
+        let tools = result.get("tools").unwrap().as_array().unwrap();
+        let has_bdd_coverage = tools
+            .iter()
+            .any(|t| t.get("name").unwrap() == "bdd_coverage");
+        assert!(has_bdd_coverage);
+    }
+
+    #[test]
+    fn test_handle_tools_list_bdd_coverage_schema() {
+        let (server, _temp_dir) = create_test_server();
+        let result = server.handle_tools_list().unwrap();
+        let tools = result.get("tools").unwrap().as_array().unwrap();
+        let bdd_tool = tools
+            .iter()
+            .find(|t| t.get("name").unwrap() == "bdd_coverage")
+            .expect("bdd_coverage tool should exist in tool list");
+
+        let input_schema = bdd_tool
+            .get("inputSchema")
+            .and_then(|value| value.get("properties"))
+            .expect("bdd_coverage inputSchema.properties should exist");
+        assert!(input_schema.get("execution_report").is_some());
+        assert!(input_schema.get("report_format").is_some());
+        assert!(bdd_tool.get("outputSchema").is_some());
     }
 
     #[test]

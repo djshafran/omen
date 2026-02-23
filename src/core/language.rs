@@ -22,6 +22,7 @@ pub enum Language {
     Ruby,
     Php,
     Bash,
+    Gherkin,
 }
 
 impl Language {
@@ -48,6 +49,7 @@ impl Language {
             "rb" | "rake" | "gemspec" => Some(Self::Ruby),
             "php" => Some(Self::Php),
             "sh" | "bash" => Some(Self::Bash),
+            "feature" => Some(Self::Gherkin),
             _ => None,
         }
     }
@@ -69,6 +71,7 @@ impl Language {
             Self::Ruby => "Ruby",
             Self::Php => "PHP",
             Self::Bash => "Bash",
+            Self::Gherkin => "Gherkin",
         }
     }
 
@@ -91,7 +94,7 @@ impl Language {
 
     /// Check if the language uses explicit imports.
     pub fn has_imports(&self) -> bool {
-        !matches!(self, Self::C | Self::Cpp | Self::Bash)
+        !matches!(self, Self::C | Self::Cpp | Self::Bash) && !matches!(self, Self::Gherkin)
     }
 
     /// Get common file patterns for this language.
@@ -113,6 +116,7 @@ impl Language {
             Self::Ruby => &["**/*.rb", "**/*.rake", "**/*.gemspec"],
             Self::Php => &["**/*.php"],
             Self::Bash => &["**/*.sh", "**/*.bash"],
+            Self::Gherkin => &["**/*.feature"],
         }
     }
 }
@@ -169,6 +173,7 @@ mod tests {
     fn test_from_extension() {
         assert_eq!(Language::from_extension("go"), Some(Language::Go));
         assert_eq!(Language::from_extension("GO"), Some(Language::Go));
+        assert_eq!(Language::from_extension("feature"), Some(Language::Gherkin));
         assert_eq!(Language::from_extension("unknown"), None);
     }
 
@@ -177,6 +182,12 @@ mod tests {
         assert_eq!(Language::Go.display_name(), "Go");
         assert_eq!(Language::Cpp.display_name(), "C++");
         assert_eq!(Language::CSharp.display_name(), "C#");
+        assert_eq!(Language::Gherkin.display_name(), "Gherkin");
+    }
+
+    #[test]
+    fn test_gherkin_glob_patterns() {
+        assert_eq!(Language::Gherkin.glob_patterns(), &["**/*.feature"]);
     }
 
     #[test]

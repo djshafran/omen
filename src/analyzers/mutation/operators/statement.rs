@@ -130,6 +130,7 @@ fn get_statement_node_types(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["expression_statement", "assignment"],
         Language::Php => &["expression_statement", "assignment_expression"],
         Language::Bash => &["command", "variable_assignment"],
+        Language::Gherkin => &[],
     }
 }
 
@@ -165,6 +166,7 @@ fn get_control_flow_node_types(lang: Language) -> &'static [&'static str] {
             "foreach_statement",
         ],
         Language::Bash => &["if_statement", "while_statement", "for_statement"],
+        Language::Gherkin => &[],
     }
 }
 
@@ -185,6 +187,7 @@ fn find_control_flow_body<'a>(
         Language::Ruby => &["then", "do"] as &[&str],
         Language::Php => &["compound_statement"] as &[&str],
         Language::Bash => &["compound_statement"] as &[&str],
+        Language::Gherkin => &[],
     };
 
     node.children(&mut node.walk())

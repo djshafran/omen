@@ -181,6 +181,7 @@ fn get_block_kinds(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["do_block", "block"],
         Language::Php => &["compound_statement"],
         Language::Bash => &["compound_statement"],
+        Language::Gherkin => &[],
     }
 }
 
@@ -231,6 +232,7 @@ fn get_call_kinds(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["call", "method_call"],
         Language::Php => &["function_call_expression", "method_call_expression"],
         Language::Bash => &["command"],
+        Language::Gherkin => &[],
     }
 }
 

@@ -124,6 +124,12 @@ pub enum Command {
     #[command(alias = "ctx")]
     Context(ContextArgs),
 
+    /// Analyze Gherkin feature coverage and step-definition mapping.
+    /// Supports optional runtime execution report correlation for passed/failed
+    /// scenario and step states (JSON/JUnit XML).
+    #[command(name = "bdd-coverage", alias = "bddcov")]
+    BddCoverage(BddCoverageArgs),
+
     /// Generate and manage HTML health reports
     Report(ReportCommand),
 
@@ -145,6 +151,20 @@ pub struct AnalyzerArgs {
     /// Exclude files matching pattern
     #[arg(short, long)]
     pub exclude: Option<String>,
+}
+
+#[derive(Args)]
+pub struct BddCoverageArgs {
+    #[command(flatten)]
+    pub common: AnalyzerArgs,
+
+    /// Path to optional execution report (behave json, pytest-bdd, junit XML).
+    #[arg(short = 'r', long)]
+    pub execution_report: Option<PathBuf>,
+
+    /// Execution report format hint (`json` or `xml`). If omitted, inferred from file extension.
+    #[arg(long)]
+    pub report_format: Option<String>,
 }
 
 #[derive(Args)]
@@ -601,6 +621,15 @@ mod tests {
         }
     }
 
+    /// Extract BddCoverageArgs from a parsed CLI, panicking if the command is wrong.
+    fn parse_bdd_coverage_args(args: &[&str]) -> BddCoverageArgs {
+        let cli = parse(args);
+        match cli.command {
+            Command::BddCoverage(args) => args,
+            _ => panic!("Expected BddCoverage command"),
+        }
+    }
+
     /// Extract ReportSubcommand from a parsed CLI, panicking if the command is wrong.
     fn parse_report_subcommand(args: &[&str]) -> ReportSubcommand {
         let cli = parse(args);
@@ -798,6 +827,16 @@ mod tests {
     #[test]
     fn test_command_context() {
         assert_parses_to!(&["omen", "context"], Command::Context(_));
+    }
+
+    #[test]
+    fn test_command_bdd_coverage() {
+        assert_parses_to!(&["omen", "bdd-coverage"], Command::BddCoverage(_));
+    }
+
+    #[test]
+    fn test_alias_bddcov_for_bdd_coverage() {
+        assert_parses_to!(&["omen", "bddcov"], Command::BddCoverage(_));
     }
 
     #[test]
@@ -1029,6 +1068,36 @@ mod tests {
         if let Command::Context(args) = cli.command {
             assert_eq!(args.depth, 3);
         }
+    }
+
+    #[test]
+    fn test_bdd_coverage_execution_report() {
+        let args = parse_bdd_coverage_args(&[
+            "omen",
+            "bdd-coverage",
+            "-r",
+            "coverage.json",
+            "--report-format",
+            "json",
+        ]);
+
+        assert_eq!(args.execution_report, Some(PathBuf::from("coverage.json")));
+        assert_eq!(args.report_format, Some("json".to_string()));
+    }
+
+    #[test]
+    fn test_bdd_coverage_execution_report_format_xml() {
+        let args = parse_bdd_coverage_args(&[
+            "omen",
+            "bdd-coverage",
+            "-r",
+            "coverage.xml",
+            "--report-format",
+            "xml",
+        ]);
+
+        assert_eq!(args.execution_report, Some(PathBuf::from("coverage.xml")));
+        assert_eq!(args.report_format, Some("xml".to_string()));
     }
 
     // Report command tests

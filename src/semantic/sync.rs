@@ -81,16 +81,24 @@ impl<'a> SyncManager<'a> {
         // Check each current file for changes
         let files_to_index: Vec<_> = current_files
             .iter()
-            .filter(|path| {
+            .filter_map(|path| {
+                let abs_path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    root_path.join(path)
+                };
                 let rel_path = path
                     .strip_prefix(root_path)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
 
-                self.check_file_changed(path, &rel_path).unwrap_or(true)
+                match self.check_file_changed(&abs_path, &rel_path) {
+                    Ok(true) => Some(abs_path),
+                    Ok(false) => None,
+                    Err(_) => Some(abs_path),
+                }
             })
-            .cloned()
             .collect();
 
         stats.checked = current_files.len();
@@ -231,15 +239,20 @@ impl<'a> SyncManager<'a> {
 /// Parse a single file and extract chunks.
 /// This is a free function to allow parallel execution with rayon.
 fn parse_file(path: &Path, root_path: &Path) -> Result<ParsedFile> {
-    let rel_path = path
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root_path.join(path)
+    };
+    let rel_path = abs_path
         .strip_prefix(root_path)
-        .unwrap_or(path)
+        .unwrap_or(abs_path.as_path())
         .to_string_lossy()
         .to_string();
 
-    let file_hash = hash_file(path)?;
+    let file_hash = hash_file(&abs_path)?;
 
-    let source_file = SourceFile::load(path)?;
+    let source_file = SourceFile::load(&abs_path)?;
     let parser = Parser::new();
     let parse_result = parser.parse_source(&source_file)?;
 
@@ -397,6 +410,17 @@ mod tests {
         assert!(chunk.enriched_text.contains("[lib.rs]"));
         assert!(chunk.enriched_text.contains("hello"));
         assert!(!chunk.content_hash.is_empty());
+    }
+
+    #[test]
+    fn test_parse_file_accepts_relative_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("lib.rs");
+        std::fs::write(&file_path, "fn hello() { println!(\"hi\"); }\n").unwrap();
+
+        let parsed = parse_file(Path::new("lib.rs"), temp.path()).unwrap();
+        assert_eq!(parsed.chunks.len(), 1);
+        assert_eq!(parsed.chunks[0].file_path, "lib.rs");
     }
 
     #[test]

@@ -105,6 +105,7 @@ fn get_literal_node_types(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["integer", "float"],
         Language::Php => &["integer", "float"],
         Language::Bash => &[], // Bash doesn't have typed literals
+        Language::Gherkin => &[],
     }
 }
 
@@ -122,6 +123,7 @@ fn get_boolean_node_types(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["true", "false"],
         Language::Php => &["boolean"],
         Language::Bash => &[],
+        Language::Gherkin => &[],
     }
 }
 

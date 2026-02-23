@@ -1,5 +1,6 @@
 //! Code analyzers for various metrics and issues.
 
+pub mod bdd_coverage;
 pub mod changes;
 pub mod churn;
 pub mod cohesion;
@@ -19,5 +20,6 @@ pub mod tdg;
 pub mod temporal;
 
 // Re-export analyzer types for convenience
+pub use bdd_coverage::Analyzer as BddCoverageAnalyzer;
 pub use complexity::Analyzer as ComplexityAnalyzer;
 pub use satd::Analyzer as SatdAnalyzer;

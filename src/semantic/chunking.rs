@@ -163,6 +163,7 @@ fn get_type_node_kinds(lang: Language) -> Vec<&'static str> {
         Language::Ruby => vec!["class", "module"],
         Language::Php => vec!["class_declaration", "interface_declaration"],
         Language::Bash => vec![],
+        Language::Gherkin => vec![],
     }
 }
 

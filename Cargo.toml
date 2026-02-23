@@ -46,6 +46,7 @@ tree-sitter-c-sharp = "0.23"
 tree-sitter-ruby = "0.23"
 tree-sitter-php = "0.23"
 tree-sitter-bash = "0.23"
+tree-sitter-gherkin = { git = "https://github.com/binhtddev/tree-sitter-gherkin", rev = "1a709aebeecbe81bd70dfd6ea784894844be1511" }
 
 # Git operations
 gix = { version = "0.78", default-features = false, features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "revision", "blob-diff", "merge", "blame"] }

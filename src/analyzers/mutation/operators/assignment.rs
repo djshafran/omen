@@ -108,6 +108,7 @@ fn get_assignment_expression_types(lang: Language) -> &'static [&'static str] {
         Language::Ruby => &["operator_assignment"],
         Language::Php => &["augmented_assignment_expression"],
         Language::Bash => &["assignment"],
+        Language::Gherkin => &[],
     }
 }
 

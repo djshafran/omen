@@ -111,6 +111,7 @@ pub fn get_tree_sitter_language(lang: Language) -> Result<TsLanguage> {
         Language::Ruby => tree_sitter_ruby::LANGUAGE,
         Language::Php => tree_sitter_php::LANGUAGE_PHP,
         Language::Bash => tree_sitter_bash::LANGUAGE,
+        Language::Gherkin => tree_sitter_gherkin::LANGUAGE,
     };
     Ok(ts_lang.into())
 }
@@ -226,9 +227,7 @@ pub fn extract_imports(result: &ParseResult) -> Vec<ImportNode> {
             Language::Python
                 if node.kind() == "import_statement" || node.kind() == "import_from_statement" =>
             {
-                if let Some(import) = extract_python_import(&node, source) {
-                    imports.push(import);
-                }
+                imports.extend(extract_python_import(&node, source));
             }
             Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx
                 if node.kind() == "import_statement" =>
@@ -282,6 +281,7 @@ fn get_function_node_types(lang: Language) -> Vec<&'static str> {
         Language::Ruby => vec!["method", "singleton_method"],
         Language::Php => vec!["function_definition", "method_declaration"],
         Language::Bash => vec!["function_definition"],
+        Language::Gherkin => vec!["scenario", "scenario_outline"],
     }
 }
 
@@ -290,6 +290,10 @@ fn extract_function_info(
     source: &[u8],
     lang: Language,
 ) -> Option<FunctionNode> {
+    if matches!(lang, Language::Gherkin) {
+        return extract_gherkin_function_info(node, source);
+    }
+
     let name = find_child_by_field(node, "name", source)
         .or_else(|| find_named_child(node, "identifier", source))
         .or_else(|| find_named_child(node, "property_identifier", source))?;
@@ -310,6 +314,75 @@ fn extract_function_info(
         is_exported,
         signature,
     })
+}
+
+fn extract_gherkin_function_info(
+    node: &tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<FunctionNode> {
+    if node.kind() != "scenario" && node.kind() != "scenario_outline" {
+        return None;
+    }
+
+    let name = extract_gherkin_scenario_name(node, source)?;
+    let signature = format!("Scenario: {}", name);
+    let body = node
+        .child_by_field_name("body")
+        .or_else(|| Some(*node))
+        .map(|n| (n.start_byte(), n.end_byte()));
+
+    Some(FunctionNode {
+        name,
+        start_line: node.start_position().row as u32 + 1,
+        end_line: node.end_position().row as u32 + 1,
+        body_byte_range: body,
+        is_exported: true,
+        signature,
+    })
+}
+
+fn extract_gherkin_scenario_name(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    // Preferred path: `scenario_line` -> `context` tokens.
+    if let Some(scenario_line) = node
+        .children(&mut node.walk())
+        .find(|child| child.kind() == "scenario_line" || child.kind() == "scenario_outline_line")
+    {
+        let mut parts = Vec::new();
+        for child in scenario_line.children(&mut scenario_line.walk()) {
+            if child.kind() == "context" {
+                if let Ok(text) = child.utf8_text(source) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return Some(parts.join(" "));
+        }
+
+        if let Ok(text) = scenario_line.utf8_text(source) {
+            let normalized = text.splitn(2, ':').nth(1).unwrap_or("").trim();
+            if !normalized.is_empty() {
+                return Some(normalized.to_string());
+            }
+        }
+    }
+
+    // Fallback: parse the first line text after a keyword marker.
+    if let Ok(text) = node.utf8_text(source) {
+        for line in text.lines() {
+            if line.contains(':') {
+                let suffix = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                if !suffix.is_empty() {
+                    return Some(suffix.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn find_child_by_field(node: &tree_sitter::Node<'_>, field: &str, source: &[u8]) -> Option<String> {
@@ -471,13 +544,113 @@ fn extract_rust_mod(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<Impor
     })
 }
 
-fn extract_python_import(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<ImportNode> {
-    let path = node.utf8_text(source).ok()?.to_string();
-    Some(ImportNode {
-        path,
-        line: node.start_position().row as u32 + 1,
-        names: Vec::new(),
-    })
+fn extract_python_import(node: &tree_sitter::Node<'_>, source: &[u8]) -> Vec<ImportNode> {
+    let mut imports = Vec::new();
+    let raw_path = node.utf8_text(source).ok().unwrap_or("");
+    let normalized = normalize_python_import_statement(raw_path);
+    let line = node.start_position().row as u32 + 1;
+
+    let Some(statement) = normalized.strip_prefix("import ") else {
+        let Some(from_body) = normalized.strip_prefix("from ") else {
+            return imports;
+        };
+
+        let mut parts = from_body.splitn(2, " import ");
+        let module = parts.next().unwrap_or("").trim();
+        let imported = parts.next().unwrap_or("").trim();
+        if module.is_empty() || imported.is_empty() {
+            return imports;
+        }
+
+        let imported_names = split_python_import_items(imported);
+        if imported_names.is_empty() {
+            return imports;
+        }
+
+        if module.starts_with('.') {
+            // from .foo import bar -> dependencies can be ".foo" and ".foo.bar"
+            let base = strip_python_alias(module);
+            let base_is_relative_root = base.chars().all(|c| c == '.');
+
+            if !base_is_relative_root && !base.is_empty() {
+                imports.push(ImportNode {
+                    path: base.clone(),
+                    line,
+                    names: Vec::new(),
+                });
+            }
+            imported_names.into_iter().for_each(|name| {
+                if name == "*" {
+                    return;
+                }
+
+                let target = if base_is_relative_root {
+                    format!("{base}{name}")
+                } else {
+                    format!("{base}.{name}")
+                };
+
+                imports.push(ImportNode {
+                    path: target,
+                    line,
+                    names: Vec::new(),
+                });
+            });
+            return imports;
+        }
+
+        // from vivasvan.foo import bar -> dependency is module vivasvan.foo
+        imports.push(ImportNode {
+            path: strip_python_alias(module),
+            line,
+            names: Vec::new(),
+        });
+        return imports;
+    };
+
+    let module_statements = split_python_import_items(statement);
+    for module in module_statements {
+        if module.is_empty() {
+            continue;
+        }
+        imports.push(ImportNode {
+            path: module,
+            line,
+            names: Vec::new(),
+        });
+    }
+
+    imports
+}
+
+fn normalize_python_import_statement(raw: &str) -> String {
+    raw.lines()
+        .filter_map(|line| line.split_once('#').map(|(code, _)| code).or(Some(line)))
+        .flat_map(|line| line.split(['(', ')', '\\', ';']))
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+fn split_python_import_items(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|name| strip_python_alias(name))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn strip_python_alias(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches(',')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn extract_js_import(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<ImportNode> {
@@ -752,6 +925,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_gherkin() {
+        let parser = Parser::new();
+        let content = b"Feature: Checkout\n  Scenario: User logs in\n    Given user is on login page\n    Then dashboard is visible\n  Scenario Outline: Order by sku\n    Given product <name> exists\n    Then cart contains <name>\n  Examples:\n    | name |\n    | Widget |\n";
+        let result = parser
+            .parse(content, Language::Gherkin, Path::new("sample.feature"))
+            .unwrap();
+
+        let functions = extract_functions(&result);
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "User logs in");
+        assert_eq!(functions[1].name, "Order by sku");
+        assert_eq!(functions[0].signature, "Scenario: User logs in");
+    }
+
+    #[test]
     fn test_parse_result_root_node() {
         let parser = Parser::new();
         let content = b"fn main() {}";
@@ -792,6 +980,7 @@ mod tests {
         assert!(get_tree_sitter_language(Language::Ruby).is_ok());
         assert!(get_tree_sitter_language(Language::Php).is_ok());
         assert!(get_tree_sitter_language(Language::Bash).is_ok());
+        assert!(get_tree_sitter_language(Language::Gherkin).is_ok());
     }
 
     #[test]
@@ -867,13 +1056,68 @@ mod tests {
     #[test]
     fn test_extract_python_imports() {
         let parser = Parser::new();
-        let content = b"import os\nfrom pathlib import Path\n\ndef main(): pass";
+        let content = b"import os, sys\nfrom pathlib import Path\nfrom vivasvan.strategy import evaluator\n\ndef main(): pass";
         let result = parser
             .parse(content, Language::Python, Path::new("main.py"))
             .unwrap();
 
         let imports = extract_imports(&result);
-        assert_eq!(imports.len(), 2);
+        assert_eq!(imports.len(), 4);
+        assert_eq!(imports[0].path, "os");
+        assert_eq!(imports[1].path, "sys");
+        assert_eq!(imports[2].path, "pathlib");
+        assert_eq!(imports[3].path, "vivasvan.strategy");
+    }
+
+    #[test]
+    fn test_extract_python_import_relative_and_parens() {
+        let parser = Parser::new();
+        let content = b"from . import (
+  utils,
+  validators as V
+)\nfrom ..strategy_evaluator import evaluator\nfrom .utils import io as io_utils\nfrom .. import parser\n";
+        let result = parser
+            .parse(content, Language::Python, Path::new("main.py"))
+            .unwrap();
+
+        let imports = extract_imports(&result);
+        assert_eq!(imports.len(), 7);
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(paths.contains(&".utils"));
+        assert!(paths.contains(&".validators"));
+        assert!(paths.contains(&"..strategy_evaluator"));
+        assert!(paths.contains(&"..strategy_evaluator.evaluator"));
+        assert!(paths.contains(&".utils.io"));
+        assert!(paths.contains(&"..parser"));
+    }
+
+    #[test]
+    fn test_extract_python_imports_from_vivasvan() {
+        use std::path::Path;
+
+        let path =
+            Path::new("/home/ivan/app/trader-core/vivasvan/src/vivasvan/trading/strategy_evaluator/entrypoints/worker.py");
+        let source = std::fs::read(path).expect("failed to read test fixture");
+        let parser = Parser::new();
+        let result = parser
+            .parse(&source, Language::Python, path)
+            .expect("parse failed");
+        let imports = extract_imports(&result);
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+
+        assert!(!imports.is_empty(), "no imports found in {:?}", path);
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.contains("vivasvan.trading.strategy_evaluator")),
+            "imports={:?}",
+            paths
+        );
+        assert!(
+            !paths.iter().any(|path| path == &"__future__"),
+            "future import should not stay in internal dependency set; {:?}",
+            paths
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ omen search query "how do we handle authentication"
 ```
 
 Returns ranked results based on semantic similarity, not keyword matching.
+Scenarios and Gherkin steps are indexed as `function` symbols when `.feature` files are present.
 
 ## Quick Start
 
@@ -152,7 +153,7 @@ Index stored in `.omen/search.db` (SQLite):
 
 ## Limitations
 
-- **Functions only** - Currently indexes function/method definitions. Classes, types, and modules not yet indexed.
+- **Functions and Gherkin scenarios/steps** - `feature` files are parsed as scenario symbols, while classes/types/modules are still not indexed.
 - **CPU inference** - candle runs on CPU. No GPU acceleration currently.
 - **No cross-repo search** - Each repository has its own index.
 

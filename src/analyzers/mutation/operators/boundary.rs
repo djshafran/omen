@@ -79,6 +79,7 @@ fn is_subscript_expression(kind: &str, lang: Language) -> bool {
         Language::Ruby => kind == "element_reference",
         Language::Php => kind == "subscript_expression",
         Language::Bash => kind == "subscript",
+        Language::Gherkin => false,
     }
 }
 
