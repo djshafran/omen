@@ -1,13 +1,13 @@
 [package]
 name = "omen-cli"
-version = "4.24.0"
+version = "4.25.0-bdd.1"
 edition = "2021"
 rust-version = "1.92"
-authors = ["Panbanda"]
+authors = ["Panbanda","DjShafran"]
 license = "Apache-2.0"
-description = "Multi-language code analysis CLI for AI assistants"
-repository = "https://github.com/panbanda/omen"
-keywords = ["code-analysis", "complexity", "technical-debt", "mcp", "cli"]
+description = "Multi-language code analysis CLI for AI assistants, including BDD coverage and Python step definitions"
+repository = "https://github.com/djshafran/omen"
+keywords = ["code-analysis", "complexity", "technical-debt", "mcp", "bdd"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lib]
