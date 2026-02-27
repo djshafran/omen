@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "omen-cli"
-version = "4.25.0-bdd.1"
+version = "4.25.0-bdd.2"
 dependencies = [
  "anyhow",
  "assert_cmd",

@@ -1121,6 +1121,7 @@ fn run_search(
 
     match subcommand {
         SearchSubcommand::Index(args) => {
+            let index_scope = args.files.as_deref();
             if args.force {
                 // Remove existing cache
                 let cache_path = path.join(".omen").join("search.db");
@@ -1130,13 +1131,21 @@ fn run_search(
                 }
                 // Recreate search instance with fresh cache
                 let search = SemanticSearch::new(&search_config, path)?;
-                let stats = search.index(config)?;
+                let stats = if let Some(scope) = index_scope {
+                    search.index_in_paths(config, scope)?
+                } else {
+                    search.index(config)?
+                };
                 eprintln!(
                     "Indexed {} files ({} symbols), {} errors",
                     stats.indexed, stats.symbols, stats.errors
                 );
             } else {
-                let stats = search.index(config)?;
+                let stats = if let Some(scope) = index_scope {
+                    search.index_in_paths(config, scope)?
+                } else {
+                    search.index(config)?
+                };
                 eprintln!(
                     "Indexed {} files ({} symbols), {} removed, {} errors",
                     stats.indexed, stats.symbols, stats.removed, stats.errors

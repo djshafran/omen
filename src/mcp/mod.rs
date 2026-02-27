@@ -182,6 +182,7 @@ impl McpServer {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
+                            "path": {"type": "string", "description": "File or directory path"},
                             "commit": {"type": "string", "description": "Commit or range to analyze"},
                             "count": {"type": "integer", "description": "Number of commits"}
                         }
@@ -364,6 +365,7 @@ impl McpServer {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
+                            "path": {"type": "string", "description": "Project root path (defaults to MCP server root)"},
                             "query": {"type": "string", "description": "Natural language search query"},
                             "top_k": {"type": "integer", "description": "Maximum number of results (default: 10)"},
                             "min_score": {"type": "number", "description": "Minimum similarity score 0-1 (default: 0.3)"},
@@ -380,6 +382,7 @@ impl McpServer {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
+                            "path": {"type": "string", "description": "Project root path (defaults to MCP server root)"},
                             "hypothetical_document": {"type": "string", "description": "A code snippet resembling the code you want to find"},
                             "query": {"type": "string", "description": "Original query for display purposes"},
                             "top_k": {"type": "integer", "description": "Maximum number of results (default: 10)"},
@@ -403,19 +406,41 @@ impl McpServer {
             .ok_or("Missing tool name")?;
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-        let path = arguments
+        let explicit_path = arguments
             .get("path")
             .and_then(|v| v.as_str())
-            .map(PathBuf::from)
+            .map(PathBuf::from);
+        let mut path = explicit_path
+            .clone()
             .unwrap_or_else(|| self.root_path.clone());
+
+        // For git-dependent tools, if no explicit path was provided and MCP root
+        // is not a git repo, fall back to current working directory when it is.
+        let requires_git_tool = matches!(
+            tool_name,
+            "changes" | "temporal" | "ownership" | "hotspot" | "defect" | "churn"
+        );
+        if explicit_path.is_none() && requires_git_tool && GitRepo::open(&path).is_err() {
+            if let Ok(cwd) = std::env::current_dir() {
+                if GitRepo::open(&cwd).is_ok() {
+                    path = cwd;
+                }
+            }
+        }
 
         let file_set = FileSet::from_path(&path, &self.config)
             .map_err(|e| format!("Failed to create file set: {}", e))?;
 
-        // Try to open a git repository at the path
-        let git_root = GitRepo::open(&path).ok().map(|r| r.root().to_path_buf());
+        // Try to open a git repository at the selected path. If that fails and
+        // selected path differs from file_set root (e.g., relative/file path), try root.
+        let git_root = GitRepo::open(&path)
+            .ok()
+            .map(|r| r.root().to_path_buf())
+            .or_else(|| GitRepo::open(file_set.root()).ok().map(|r| r.root().to_path_buf()));
 
-        let mut ctx = AnalysisContext::new(&file_set, &self.config, Some(&self.root_path));
+        // Always use FileSet root for reading files. This keeps analysis aligned
+        // with the requested `path` argument instead of MCP server startup root.
+        let mut ctx = AnalysisContext::new(&file_set, &self.config, None);
         if let Some(ref git_path) = git_root {
             ctx = ctx.with_git_path(git_path);
         }
@@ -457,10 +482,10 @@ impl McpServer {
                 return self.handle_diff(&path, &arguments);
             }
             "semantic_search" => {
-                return self.handle_semantic_search(&arguments);
+                return self.handle_semantic_search(&arguments, &path);
             }
             "semantic_search_hyde" => {
-                return self.handle_semantic_search_hyde(&arguments);
+                return self.handle_semantic_search_hyde(&arguments, &path);
             }
             _ => Err(format!("Unknown tool: {}", tool_name)),
         }?;
@@ -486,6 +511,13 @@ impl McpServer {
         ctx: &AnalysisContext<'_>,
         analyzer: A,
     ) -> std::result::Result<Value, String> {
+        if analyzer.requires_git() && ctx.git_path.is_none() {
+            return Err(format!(
+                "Git repository not found for path '{}'. Pass 'path' pointing inside a git repository.",
+                ctx.root.display()
+            ));
+        }
+
         let result = analyzer
             .analyze(ctx)
             .map_err(|e| format!("Analysis failed: {}", e))?;
@@ -523,7 +555,11 @@ impl McpServer {
         }))
     }
 
-    fn handle_semantic_search(&self, arguments: &Value) -> std::result::Result<Value, String> {
+    fn handle_semantic_search(
+        &self,
+        arguments: &Value,
+        root_path: &std::path::Path,
+    ) -> std::result::Result<Value, String> {
         use crate::semantic::{SearchConfig, SearchFilters, SemanticSearch};
 
         let query = arguments
@@ -568,7 +604,7 @@ impl McpServer {
             ..SearchConfig::default()
         };
 
-        let search = SemanticSearch::new(&search_config, &self.root_path)
+        let search = SemanticSearch::new(&search_config, root_path)
             .map_err(|e| format!("Failed to initialize semantic search: {}", e))?;
 
         // Ensure index exists (auto-index if needed)
@@ -577,7 +613,7 @@ impl McpServer {
             .map_err(|e| format!("Failed to index: {}", e))?;
 
         let mut output = if let Some(ref extra) = include_projects {
-            let mut all_projects: Vec<&std::path::Path> = vec![&self.root_path];
+            let mut all_projects: Vec<&std::path::Path> = vec![root_path];
             all_projects.extend(extra.iter().map(|p| p.as_path()));
             let mr = crate::semantic::multi_repo::multi_repo_search(
                 &all_projects,
@@ -623,7 +659,11 @@ impl McpServer {
         }))
     }
 
-    fn handle_semantic_search_hyde(&self, arguments: &Value) -> std::result::Result<Value, String> {
+    fn handle_semantic_search_hyde(
+        &self,
+        arguments: &Value,
+        root_path: &std::path::Path,
+    ) -> std::result::Result<Value, String> {
         use crate::semantic::{SearchConfig, SearchFilters, SemanticSearch};
 
         let hypothetical_document = arguments
@@ -673,7 +713,7 @@ impl McpServer {
             ..SearchConfig::default()
         };
 
-        let search = SemanticSearch::new(&search_config, &self.root_path)
+        let search = SemanticSearch::new(&search_config, root_path)
             .map_err(|e| format!("Failed to initialize semantic search: {}", e))?;
 
         search
@@ -682,7 +722,7 @@ impl McpServer {
 
         // Use the hypothetical document as the search query text
         let mut output = if let Some(ref extra) = include_projects {
-            let mut all_projects: Vec<&std::path::Path> = vec![&self.root_path];
+            let mut all_projects: Vec<&std::path::Path> = vec![root_path];
             all_projects.extend(extra.iter().map(|p| p.as_path()));
             let mr = crate::semantic::multi_repo::multi_repo_search(
                 &all_projects,
@@ -851,6 +891,28 @@ mod tests {
     }
 
     #[test]
+    fn test_changes_tool_schema_exposes_path() {
+        let (server, _temp_dir) = create_test_server();
+        let result = server.handle_tools_list().unwrap();
+        let tools = result
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .expect("tools array should exist");
+        let changes_tool = tools
+            .iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("changes"))
+            .expect("changes tool should exist");
+        let properties = changes_tool
+            .get("inputSchema")
+            .and_then(|v| v.get("properties"))
+            .expect("changes input schema properties should exist");
+        assert!(
+            properties.get("path").is_some(),
+            "changes tool should expose `path` parameter"
+        );
+    }
+
+    #[test]
     fn test_handle_tool_call_missing_params() {
         let (server, _temp_dir) = create_test_server();
         let result = server.handle_tool_call(None);
@@ -894,6 +956,47 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_tool_call_graph_respects_path_argument() {
+        let server_root = TempDir::new().unwrap();
+        let analyzed_root = TempDir::new().unwrap();
+
+        // File lives outside MCP server root. Graph should still analyze it.
+        std::fs::write(analyzed_root.path().join("test.rs"), "fn main() {}").unwrap();
+
+        let server = McpServer::new(server_root.path().to_path_buf(), Config::default());
+        let params = json!({
+            "name": "graph",
+            "arguments": {"path": analyzed_root.path().to_str().unwrap()}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "graph tool should succeed with explicit path: {:?}",
+            result.err()
+        );
+
+        let response = result.unwrap();
+        let content = response
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .expect("graph response should contain JSON text");
+        let graph: serde_json::Value =
+            serde_json::from_str(content).expect("graph payload should be valid JSON");
+        let total_nodes = graph
+            .get("summary")
+            .and_then(|s| s.get("total_nodes"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        assert!(
+            total_nodes > 0,
+            "graph should include nodes for files under explicit path"
+        );
+    }
+
+    #[test]
     fn test_handle_tool_call_satd() {
         let (server, temp_dir) = create_test_server();
         // Create a test file with SATD
@@ -932,6 +1035,50 @@ mod tests {
         );
         let response = result.unwrap();
         assert!(response.get("content").is_some());
+    }
+
+    #[test]
+    fn test_handle_tool_call_changes_respects_explicit_path() {
+        let (_git_server, git_repo_dir) = create_git_test_server();
+        let non_git_root = TempDir::new().unwrap();
+        let server = McpServer::new(non_git_root.path().to_path_buf(), Config::default());
+
+        let params = json!({
+            "name": "changes",
+            "arguments": {
+                "path": git_repo_dir.path().to_str().unwrap(),
+                "count": 20
+            }
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "changes tool should succeed with explicit git path: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_handle_tool_call_changes_non_git_path_has_helpful_error() {
+        let (server, temp_dir) = create_test_server();
+        let params = json!({
+            "name": "changes",
+            "arguments": {
+                "path": temp_dir.path().to_str().unwrap(),
+                "count": 10
+            }
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(result.is_err(), "changes should fail on non-git path");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Git repository not found for path"),
+            "expected helpful git-path error, got: {err}"
+        );
+        assert!(
+            err.contains("Pass 'path'"),
+            "expected path hint in error, got: {err}"
+        );
     }
 
     #[test]

@@ -1,0 +1,169 @@
+name: Release BDD Branch
+
+on:
+  push:
+    branches: [bdd_coverage]
+  workflow_dispatch:
+
+concurrency:
+  group: release-bdd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prepare-release:
+    name: Prepare GitHub Release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Read version metadata
+        id: meta
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "Failed to read version from Cargo.toml"
+            exit 1
+          fi
+
+          TAG="omen-v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          cat > release-notes.md <<EOF
+          ## What's New
+          ### Highlights
+          - Added BDD feature/scenario analysis and Python step-definition correlation.
+          - Added CLI and MCP analyzer entrypoint: \`bdd-coverage\`.
+          - Added optional execution report support (behave/pytest-bdd JSON and JUnit XML) with passed/failed/skipped status mapping.
+
+          ## Installation on OpenAI Codex
+          Run this inside your Codex workspace:
+          \`\`\`bash
+          OWNER=${OWNER}
+          REPO=${REPO}
+          TAG=${TAG}
+          VERSION=${VERSION}
+          ARCH=x86_64-unknown-linux-gnu
+
+          curl -L -o /tmp/omen.tar.gz "https://github.com/\${OWNER}/\${REPO}/releases/download/\${TAG}/omen_\${VERSION}_\${ARCH}.tar.gz"
+          tar -xzf /tmp/omen.tar.gz -C /tmp
+          sudo install -m 755 /tmp/omen /usr/local/bin/omen
+          omen --version
+          \`\`\`
+          EOF
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "BDD Coverage and Python Step Definitions" \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --target "$GITHUB_SHA" \
+              --title "BDD Coverage and Python Step Definitions" \
+              --prerelease \
+              --notes-file release-notes.md
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare-release
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          toolchain: stable
+
+      - name: Add compilation target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create archive and checksum
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          ARCHIVE_NAME="omen_${VERSION}_${{ matrix.target }}"
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/omen dist/
+          cd dist
+          tar -czvf "${ARCHIVE_NAME}.tar.gz" omen
+          shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: gh release upload "$TAG" --repo "${{ github.repository }}" dist/*.tar.gz dist/*.sha256 --clobber
+
+  checksums:
+    name: Upload checksums.txt
+    needs: [prepare-release, build]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download checksum artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: |
+          mkdir -p dist
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.sha256" --dir dist
+          cat dist/*.sha256 | sort > dist/checksums.txt
+
+      - name: Upload checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: gh release upload "$TAG" --repo "${{ github.repository }}" dist/checksums.txt --clobber

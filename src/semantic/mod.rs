@@ -90,6 +90,17 @@ impl SemanticSearch {
         sync_manager.sync(&file_set, &self.root_path)
     }
 
+    /// Index only a subset of files/directories (comma-separated paths).
+    ///
+    /// Paths may be relative to root or absolute paths under the root.
+    /// Non-matching paths are ignored.
+    pub fn index_in_paths(&self, file_config: &Config, paths: &str) -> Result<SyncStats> {
+        let file_set = FileSet::from_path(&self.root_path, file_config)?;
+        let filtered = filter_file_set_by_paths(&file_set, paths);
+        let sync_manager = SyncManager::new(&self.cache);
+        sync_manager.sync(&filtered, &self.root_path)
+    }
+
     /// Search for symbols matching the query.
     pub fn search(&self, query: &str, top_k: Option<usize>) -> Result<SearchOutput> {
         let top_k = top_k.unwrap_or(self.config.max_results);
@@ -142,6 +153,61 @@ impl SemanticSearch {
     pub fn root_path(&self) -> &Path {
         &self.root_path
     }
+}
+
+fn filter_file_set_by_paths(file_set: &FileSet, paths: &str) -> FileSet {
+    let scopes = parse_scopes(paths, file_set.root());
+    if scopes.is_empty() {
+        return file_set.clone();
+    }
+
+    let matched: Vec<PathBuf> = file_set
+        .files()
+        .iter()
+        .filter(|rel| {
+            let rel_norm = normalize_scope(rel.to_string_lossy().as_ref());
+            scopes
+                .iter()
+                .any(|scope| rel_norm == *scope || rel_norm.starts_with(&format!("{scope}/")))
+        })
+        .cloned()
+        .collect();
+
+    FileSet::from_files(file_set.root().to_path_buf(), matched)
+}
+
+fn parse_scopes(paths: &str, root: &Path) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for raw in paths.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        let path = Path::new(raw);
+        let normalized = if path.is_absolute() {
+            path.strip_prefix(root)
+                .ok()
+                .map(|p| normalize_scope(p.to_string_lossy().as_ref()))
+        } else {
+            Some(normalize_scope(raw))
+        };
+
+        if let Some(scope) = normalized {
+            if !scope.is_empty() && !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
+        }
+    }
+    scopes
+}
+
+fn normalize_scope(value: &str) -> String {
+    let mut normalized = value.trim().replace('\\', "/");
+    while normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
 }
 
 #[cfg(test)]
@@ -238,5 +304,42 @@ mod tests {
             .unwrap();
         assert_eq!(filtered.results.len(), 1);
         assert_eq!(filtered.results[0].symbol_name, "low_complexity");
+    }
+
+    #[test]
+    fn test_filter_file_set_by_paths_directory_scope() {
+        let root = PathBuf::from("/repo");
+        let file_set = FileSet::from_files(
+            root.clone(),
+            vec![
+                PathBuf::from("src/a.rs"),
+                PathBuf::from("src/nested/b.rs"),
+                PathBuf::from("tests/c.rs"),
+            ],
+        );
+
+        let filtered = filter_file_set_by_paths(&file_set, "src/");
+        let files = filtered.files();
+
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&PathBuf::from("src/a.rs")));
+        assert!(files.contains(&PathBuf::from("src/nested/b.rs")));
+    }
+
+    #[test]
+    fn test_filter_file_set_by_paths_absolute_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let file_set = FileSet::from_files(
+            root.clone(),
+            vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")],
+        );
+        let absolute = root.join("src").join("a.rs");
+
+        let filtered = filter_file_set_by_paths(&file_set, &absolute.to_string_lossy());
+        let files = filtered.files();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], PathBuf::from("src/a.rs"));
     }
 }

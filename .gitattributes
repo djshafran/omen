@@ -1,0 +1,13 @@
+# Keep line endings stable across platforms.
+* text=auto eol=lf
+
+# Common binary assets (no EOL normalization).
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.7z binary

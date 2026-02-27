@@ -424,6 +424,10 @@ pub struct SearchIndexArgs {
     /// Force full re-index (ignore cache)
     #[arg(long)]
     pub force: bool,
+
+    /// Limit indexing scope to specific files or directories (comma-separated)
+    #[arg(long)]
+    pub files: Option<String>,
 }
 
 #[derive(Clone, Args)]
@@ -1352,6 +1356,19 @@ mod tests {
             parse_search_subcommand(&["omen", "search", "index", "--force"])
         {
             assert!(args.force);
+        }
+    }
+
+    #[test]
+    fn test_search_index_files() {
+        if let SearchSubcommand::Index(args) = parse_search_subcommand(&[
+            "omen",
+            "search",
+            "index",
+            "--files",
+            "vivasvan/src/vivasvan/",
+        ]) {
+            assert_eq!(args.files, Some("vivasvan/src/vivasvan/".to_string()));
         }
     }
 
