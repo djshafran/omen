@@ -43,6 +43,8 @@ pub struct AnalysisContext<'a> {
     pub files: &'a FileSet,
     /// Git repository path (for creating thread-local repos).
     pub git_path: Option<&'a Path>,
+    /// Optional git pathscope relative to repository root.
+    pub git_scope: Option<&'a Path>,
     /// Configuration.
     pub config: &'a Config,
     /// Progress callback.
@@ -58,6 +60,7 @@ impl<'a> AnalysisContext<'a> {
             root: root.unwrap_or_else(|| files.root()),
             files,
             git_path: None,
+            git_scope: None,
             config,
             on_progress: None,
             content_source: None,
@@ -67,6 +70,12 @@ impl<'a> AnalysisContext<'a> {
     /// Add git repository path to context.
     pub fn with_git_path(mut self, git_path: &'a Path) -> Self {
         self.git_path = Some(git_path);
+        self
+    }
+
+    /// Add git scope (path relative to git repository root) to context.
+    pub fn with_git_scope(mut self, git_scope: &'a Path) -> Self {
+        self.git_scope = Some(git_scope);
         self
     }
 

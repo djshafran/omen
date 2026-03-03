@@ -204,6 +204,7 @@ fn parse_since_duration(since: &str) -> Option<std::time::Duration> {
 pub fn get_log_with_stats(
     repo: &Repository,
     since: Option<&str>,
+    paths: Option<&[PathBuf]>,
     limit: Option<usize>,
 ) -> Result<Vec<Commit>> {
     let repo_path = repo
@@ -221,6 +222,15 @@ pub fn get_log_with_stats(
 
     if let Some(max) = limit {
         cmd.arg(format!("-n{}", max));
+    }
+
+    if let Some(pathspecs) = paths {
+        if !pathspecs.is_empty() {
+            cmd.arg("--");
+            for path in pathspecs {
+                cmd.arg(path);
+            }
+        }
     }
 
     let output = cmd
@@ -1110,17 +1120,83 @@ mod tests {
         let repo = gix::open(repo_path).expect("failed to open repo");
 
         // Without limit: all 5 commits
-        let all = get_log_with_stats(&repo, None, None).expect("failed to get log");
+        let all = get_log_with_stats(&repo, None, None, None).expect("failed to get log");
         assert_eq!(all.len(), 5);
 
         // With limit of 2: only 2 commits
-        let limited = get_log_with_stats(&repo, None, Some(2)).expect("failed to get limited log");
+        let limited =
+            get_log_with_stats(&repo, None, None, Some(2)).expect("failed to get limited log");
         assert_eq!(
             limited.len(),
             2,
             "Expected 2 commits with limit=2, got {}",
             limited.len()
         );
+    }
+
+    #[test]
+    fn test_get_log_with_stats_respects_pathspec() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to init git repo");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to set git email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to set git name");
+
+        std::fs::create_dir_all(repo_path.join("src/market")).unwrap();
+        std::fs::create_dir_all(repo_path.join("src/other")).unwrap();
+
+        std::fs::write(repo_path.join("src/market/a.rs"), "fn a() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to add first commit");
+        Command::new("git")
+            .args(["commit", "-m", "add market a"])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to commit first commit");
+
+        std::fs::write(repo_path.join("src/other/b.rs"), "fn b() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to add second commit");
+        Command::new("git")
+            .args(["commit", "-m", "add other b"])
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to commit second commit");
+
+        let repo = gix::open(repo_path).expect("failed to open repo");
+        let pathspec = [PathBuf::from("src/market")];
+
+        let commits = get_log_with_stats(&repo, None, Some(&pathspec), None)
+            .expect("failed to get scoped log with stats");
+
+        assert!(!commits.is_empty(), "expected at least one scoped commit");
+        assert!(commits.iter().all(|c| {
+            !c.files.is_empty()
+                && c.files
+                    .iter()
+                    .all(|f| f.path.to_string_lossy().starts_with("src/market/"))
+        }));
     }
 
     #[test]

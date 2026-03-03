@@ -86,8 +86,13 @@ impl GitRepo {
     }
 
     /// Get commit log with file change statistics (equivalent to git log --numstat).
-    pub fn log_with_stats(&self, since: Option<&str>, limit: Option<usize>) -> Result<Vec<Commit>> {
-        log::get_log_with_stats(&self.repo, since, limit)
+    pub fn log_with_stats(
+        &self,
+        since: Option<&str>,
+        paths: Option<&[PathBuf]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Commit>> {
+        log::get_log_with_stats(&self.repo, since, paths, limit)
     }
 
     /// Get per-file churn (commit count + authors) for specific paths.

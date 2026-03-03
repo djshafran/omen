@@ -16,7 +16,7 @@
 //! - Min cochanges (default 3) filters statistical noise
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,7 @@ impl Analyzer {
 
     /// Analyzes temporal coupling using an existing git repo.
     fn analyze_with_git(&self, git_repo: &GitRepo, _root: &Path) -> Result<Analysis> {
-        self.analyze_with_git_filtered(git_repo, _root, false, &[])
+        self.analyze_with_git_filtered(git_repo, _root, false, &[], None)
     }
 
     /// Analyzes temporal coupling with optional test file exclusion.
@@ -105,6 +105,7 @@ impl Analyzer {
         _root: &Path,
         exclude_tests: bool,
         exclude_patterns: &[String],
+        scope_paths: Option<&[PathBuf]>,
     ) -> Result<Analysis> {
         let exclude_globs = if !exclude_patterns.is_empty() {
             let mut builder = globset::GlobSetBuilder::new();
@@ -122,7 +123,7 @@ impl Analyzer {
         let since_str = format!("{} days", self.config.days);
 
         // Get commit log with file changes
-        let commits = git_repo.log_with_stats(Some(&since_str), None)?;
+        let commits = git_repo.log_with_stats(Some(&since_str), scope_paths, None)?;
 
         // Track co-changes: normalized pair -> count
         let mut cochanges: HashMap<FilePair, u32> = HashMap::new();
@@ -234,7 +235,14 @@ impl AnalyzerTrait for Analyzer {
         let git_repo = GitRepo::open(git_path)?;
         let exclude_tests = ctx.config.temporal.exclude_tests;
         let exclude_patterns = &ctx.config.exclude_patterns;
-        self.analyze_with_git_filtered(&git_repo, ctx.root, exclude_tests, exclude_patterns)
+        let scope_paths = ctx.git_scope.map(|scope| vec![scope.to_path_buf()]);
+        self.analyze_with_git_filtered(
+            &git_repo,
+            ctx.root,
+            exclude_tests,
+            exclude_patterns,
+            scope_paths.as_deref(),
+        )
     }
 }
 

@@ -79,6 +79,7 @@ impl AnalyzerTrait for Analyzer {
 
         // Open repository with gix
         let repo = GitRepo::open(git_path)?;
+        let scope_paths = ctx.git_scope.map(|scope| vec![scope.to_path_buf()]);
 
         // Calculate since date (u32::MAX means "all history" -- no time limit)
         let since = if self.days == u32::MAX {
@@ -88,7 +89,7 @@ impl AnalyzerTrait for Analyzer {
         };
 
         // Get commits with file changes using gix
-        let commits = repo.log_with_stats(since.as_deref(), None)?;
+        let commits = repo.log_with_stats(since.as_deref(), scope_paths.as_deref(), None)?;
 
         // Convert to file metrics
         let file_metrics = commits_to_file_metrics(&commits);

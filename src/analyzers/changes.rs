@@ -60,7 +60,7 @@
 //! - ND: Number of directories
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
@@ -194,9 +194,10 @@ impl AnalyzerTrait for Analyzer {
         let git_path = ctx
             .git_path
             .ok_or_else(|| crate::core::Error::git("Changes analyzer requires a git repository"))?;
+        let scope_paths = ctx.git_scope.map(|scope| vec![scope.to_path_buf()]);
 
         // Get commits from last N days
-        let raw_commits = collect_commit_data(git_path, self.days)?;
+        let raw_commits = collect_commit_data(git_path, self.days, scope_paths.as_deref())?;
 
         if raw_commits.is_empty() {
             return Ok(Analysis {
@@ -524,10 +525,14 @@ fn is_automated_commit(message: &str) -> bool {
 }
 
 /// Collect commit data from git log using gix.
-fn collect_commit_data(git_path: &Path, days: u32) -> Result<Vec<RawCommit>> {
+fn collect_commit_data(
+    git_path: &Path,
+    days: u32,
+    scope_paths: Option<&[PathBuf]>,
+) -> Result<Vec<RawCommit>> {
     let repo = GitRepo::open(git_path)?;
     let since = format!("{days} days");
-    let commits = repo.log_with_stats(Some(&since), None)?;
+    let commits = repo.log_with_stats(Some(&since), scope_paths, None)?;
 
     commits_to_raw_commits(&commits)
 }

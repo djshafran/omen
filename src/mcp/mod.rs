@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) server implementation.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -398,6 +398,62 @@ impl McpServer {
         }))
     }
 
+    fn is_git_dependent_tool(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            "changes" | "temporal" | "ownership" | "hotspot" | "defect" | "churn"
+        )
+    }
+
+    /// Discover git repository root by walking up parent directories.
+    fn discover_git_root(path: &Path) -> Option<PathBuf> {
+        let mut current = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if current.is_file() {
+            current = current.parent()?.to_path_buf();
+        }
+
+        loop {
+            if let Ok(repo) = GitRepo::open(&current) {
+                return Some(repo.root().to_path_buf());
+            }
+            if !current.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Rebase files from the requested root onto git root while keeping scoped selection.
+    fn rebase_files_to_git_root(
+        file_set: &FileSet,
+        git_root: &Path,
+        scope: Option<&Path>,
+    ) -> FileSet {
+        let files: Vec<PathBuf> = match scope {
+            Some(scope_path) => file_set.iter().map(|p| scope_path.join(p)).collect(),
+            None => file_set.iter().cloned().collect(),
+        };
+        FileSet::from_files(git_root.to_path_buf(), files)
+    }
+
+    fn resolve_requested_path(
+        &self,
+        explicit_path_raw: Option<&str>,
+    ) -> (PathBuf, Option<PathBuf>, &'static str) {
+        match explicit_path_raw {
+            Some(raw) => {
+                let provided = PathBuf::from(raw);
+                if provided.is_absolute() {
+                    (provided, None, "absolute")
+                } else {
+                    let from_root = self.root_path.join(&provided);
+                    (from_root.clone(), Some(from_root), "mcp_root_relative")
+                }
+            }
+            None => (self.root_path.clone(), None, "default_mcp_root"),
+        }
+    }
+
     fn handle_tool_call(&self, params: Option<Value>) -> std::result::Result<Value, String> {
         let params = params.ok_or("Missing params")?;
         let tool_name = params
@@ -406,43 +462,78 @@ impl McpServer {
             .ok_or("Missing tool name")?;
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-        let explicit_path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from);
-        let mut path = explicit_path
-            .clone()
-            .unwrap_or_else(|| self.root_path.clone());
+        let explicit_path_raw = arguments.get("path").and_then(|v| v.as_str());
+        let (mut path, root_candidate, path_mode) = self.resolve_requested_path(explicit_path_raw);
 
         // For git-dependent tools, if no explicit path was provided and MCP root
-        // is not a git repo, fall back to current working directory when it is.
-        let requires_git_tool = matches!(
-            tool_name,
-            "changes" | "temporal" | "ownership" | "hotspot" | "defect" | "churn"
-        );
-        if explicit_path.is_none() && requires_git_tool && GitRepo::open(&path).is_err() {
+        // is not in a git repo, fall back to current working directory when it is.
+        let requires_git_tool = Self::is_git_dependent_tool(tool_name);
+        if explicit_path_raw.is_none()
+            && requires_git_tool
+            && Self::discover_git_root(&path).is_none()
+        {
             if let Ok(cwd) = std::env::current_dir() {
-                if GitRepo::open(&cwd).is_ok() {
+                if Self::discover_git_root(&cwd).is_some() {
                     path = cwd;
                 }
             }
         }
 
-        let file_set = FileSet::from_path(&path, &self.config)
-            .map_err(|e| format!("Failed to create file set: {}", e))?;
+        if !path.exists() {
+            let requested = explicit_path_raw.unwrap_or("<default MCP root>");
+            let mut details = vec![format!(
+                "Path not found: requested='{}', resolved='{}'",
+                requested,
+                path.display()
+            )];
+            if let Some(candidate) = root_candidate {
+                details.push(format!("mcp_root_relative='{}'", candidate.display()));
+            }
+            details.push(format!("mcp_root='{}'", self.root_path.display()));
+            details.push(format!("path_mode='{}'", path_mode));
+            return Err(format!(
+                "{}. Path policy: absolute -> as-is; relative -> mcp_root + path.",
+                details.join(", ")
+            ));
+        }
 
-        // Try to open a git repository at the selected path. If that fails and
-        // selected path differs from file_set root (e.g., relative/file path), try root.
-        let git_root = GitRepo::open(&path)
-            .ok()
-            .map(|r| r.root().to_path_buf())
-            .or_else(|| GitRepo::open(file_set.root()).ok().map(|r| r.root().to_path_buf()));
+        let file_set = FileSet::from_path(&path, &self.config).map_err(|e| {
+            let requested = explicit_path_raw.unwrap_or("<default MCP root>");
+            format!(
+                "Failed to create file set for requested='{}' resolved='{}': {}",
+                requested,
+                path.display(),
+                e
+            )
+        })?;
+        let requested_root = file_set.root().to_path_buf();
+
+        let git_root = if requires_git_tool {
+            Self::discover_git_root(&requested_root)
+        } else {
+            None
+        };
+
+        let mut git_scope: Option<PathBuf> = None;
+        let mut analysis_file_set = file_set;
+        if let Some(ref repo_root) = git_root {
+            if let Ok(scope) = requested_root.strip_prefix(repo_root) {
+                if !scope.as_os_str().is_empty() {
+                    git_scope = Some(scope.to_path_buf());
+                    analysis_file_set =
+                        Self::rebase_files_to_git_root(&analysis_file_set, repo_root, Some(scope));
+                }
+            }
+        }
 
         // Always use FileSet root for reading files. This keeps analysis aligned
         // with the requested `path` argument instead of MCP server startup root.
-        let mut ctx = AnalysisContext::new(&file_set, &self.config, None);
+        let mut ctx = AnalysisContext::new(&analysis_file_set, &self.config, None);
         if let Some(ref git_path) = git_root {
             ctx = ctx.with_git_path(git_path);
+        }
+        if let Some(ref scope) = git_scope {
+            ctx = ctx.with_git_scope(scope);
         }
 
         let result = match tool_name {
@@ -806,6 +897,7 @@ struct JsonRpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_server() -> (McpServer, TempDir) {
@@ -813,6 +905,17 @@ mod tests {
         let config = Config::default();
         let server = McpServer::new(temp_dir.path().to_path_buf(), config);
         (server, temp_dir)
+    }
+
+    fn extract_tool_payload(response: Value) -> serde_json::Value {
+        let content = response
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .expect("tool response should contain content[0].text");
+        serde_json::from_str(content).expect("tool payload should be valid JSON")
     }
 
     #[test]
@@ -993,6 +1096,93 @@ mod tests {
         assert!(
             total_nodes > 0,
             "graph should include nodes for files under explicit path"
+        );
+    }
+
+    #[test]
+    fn test_handle_tool_call_graph_resolves_relative_path_from_mcp_root() {
+        let (server, temp_dir) = create_test_server();
+        std::fs::create_dir_all(temp_dir.path().join("src")).unwrap();
+        std::fs::write(temp_dir.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+
+        let params = json!({
+            "name": "graph",
+            "arguments": {"path": "src"}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "graph tool should resolve relative path against MCP root: {:?}",
+            result.err()
+        );
+
+        let payload = extract_tool_payload(result.unwrap());
+        let total_nodes = payload
+            .get("summary")
+            .and_then(|s| s.get("total_nodes"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            total_nodes > 0,
+            "graph should analyze files under relative path"
+        );
+    }
+
+    #[test]
+    fn test_handle_tool_call_graph_does_not_strip_redundant_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let mcp_root = temp_dir.path().join("vivasvan");
+        std::fs::create_dir_all(mcp_root.join("src")).unwrap();
+        std::fs::write(mcp_root.join("src").join("main.rs"), "fn main() {}").unwrap();
+
+        let server = McpServer::new(mcp_root, Config::default());
+        let params = json!({
+            "name": "graph",
+            "arguments": {"path": "vivasvan/src"}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_err(),
+            "relative paths must be resolved strictly from mcp_root without magic stripping"
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("Path policy"));
+        assert!(err.contains("path_mode='mcp_root_relative'"));
+    }
+
+    #[test]
+    fn test_handle_tool_call_missing_path_has_informative_error() {
+        let (server, temp_dir) = create_test_server();
+        let params = json!({
+            "name": "graph",
+            "arguments": {"path": "does/not/exist"}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(result.is_err(), "missing path should fail");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Path not found"),
+            "error should include missing-path prefix: {err}"
+        );
+        assert!(
+            err.contains("does/not/exist"),
+            "error should include requested path: {err}"
+        );
+        assert!(
+            err.contains(&temp_dir.path().display().to_string()),
+            "error should include resolved base path: {err}"
+        );
+        assert!(
+            err.contains("mcp_root"),
+            "error should include mcp root context: {err}"
+        );
+        assert!(
+            err.contains("path_mode='mcp_root_relative'"),
+            "error should include path resolution mode: {err}"
+        );
+        assert!(
+            err.contains("Path policy"),
+            "error should include path policy invariant: {err}"
         );
     }
 
@@ -1335,6 +1525,104 @@ def logged_in(context):
         (server, temp_dir)
     }
 
+    fn create_git_scoped_test_server() -> (McpServer, TempDir, PathBuf) {
+        use std::process::Command;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to init git repo");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to set git email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to set git name");
+
+        std::fs::create_dir_all(temp_dir.path().join("src/market")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("src/other")).unwrap();
+
+        std::fs::write(temp_dir.path().join("src/market/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(temp_dir.path().join("src/market/b.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(temp_dir.path().join("src/other/c.rs"), "fn c() {}\n").unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to git add first commit");
+        Command::new("git")
+            .args(["commit", "-m", "initial layout"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to git commit first commit");
+
+        std::fs::write(
+            temp_dir.path().join("src/market/a.rs"),
+            "fn a() { let _x = 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("src/market/b.rs"),
+            "fn b() { let _y = 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("src/other/c.rs"),
+            "fn c() { let _z = 3; }\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to git add second commit");
+        Command::new("git")
+            .args(["commit", "-m", "touch market and other"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to git commit second commit");
+
+        std::fs::write(
+            temp_dir.path().join("src/market/a.rs"),
+            "fn a() { let _x = 4; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("src/market/b.rs"),
+            "fn b() { let _y = 5; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("src/other/c.rs"),
+            "fn c() { let _z = 6; }\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to git add third commit");
+        Command::new("git")
+            .args(["commit", "-m", "touch market and other again"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("failed to git commit third commit");
+
+        let server = McpServer::new(temp_dir.path().to_path_buf(), Config::default());
+        let scope_path = temp_dir.path().join("src/market");
+        (server, temp_dir, scope_path)
+    }
+
     #[test]
     fn test_handle_tool_call_ownership_with_git() {
         let (server, temp_dir) = create_git_test_server();
@@ -1397,6 +1685,153 @@ def logged_in(context):
             "temporal tool should succeed with git history: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_handle_tool_call_temporal_scoped_to_subpath() {
+        let (server, _temp_dir, scope_path) = create_git_scoped_test_server();
+
+        let params = json!({
+            "name": "temporal",
+            "arguments": {"path": scope_path.to_str().unwrap()}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "temporal should succeed for scoped path: {:?}",
+            result.err()
+        );
+
+        let payload = extract_tool_payload(result.unwrap());
+        let couplings = payload
+            .get("couplings")
+            .and_then(|v| v.as_array())
+            .expect("temporal payload should include couplings array");
+        assert!(!couplings.is_empty(), "expected scoped temporal couplings");
+        assert!(couplings.iter().all(|item| {
+            let file_a = item.get("file_a").and_then(|v| v.as_str()).unwrap_or("");
+            let file_b = item.get("file_b").and_then(|v| v.as_str()).unwrap_or("");
+            file_a.starts_with("src/market/") && file_b.starts_with("src/market/")
+        }));
+    }
+
+    #[test]
+    fn test_handle_tool_call_churn_scoped_to_subpath() {
+        let (server, _temp_dir, scope_path) = create_git_scoped_test_server();
+
+        let params = json!({
+            "name": "churn",
+            "arguments": {"path": scope_path.to_str().unwrap()}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "churn should succeed for scoped path: {:?}",
+            result.err()
+        );
+
+        let payload = extract_tool_payload(result.unwrap());
+        let files = payload
+            .get("files")
+            .and_then(|v| v.as_array())
+            .expect("churn payload should include files array");
+        assert!(!files.is_empty(), "expected scoped churn files");
+        assert!(files.iter().all(|item| {
+            item.get("relative_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .starts_with("src/market/")
+        }));
+    }
+
+    #[test]
+    fn test_handle_tool_call_changes_scoped_to_subpath() {
+        let (server, _temp_dir, scope_path) = create_git_scoped_test_server();
+
+        let params = json!({
+            "name": "changes",
+            "arguments": {"path": scope_path.to_str().unwrap(), "count": 20}
+        });
+        let result = server.handle_tool_call(Some(params));
+        assert!(
+            result.is_ok(),
+            "changes should succeed for scoped path: {:?}",
+            result.err()
+        );
+
+        let payload = extract_tool_payload(result.unwrap());
+        let commits = payload
+            .get("commits")
+            .and_then(|v| v.as_array())
+            .expect("changes payload should include commits array");
+        assert!(!commits.is_empty(), "expected scoped changes commits");
+        assert!(commits.iter().all(|commit| {
+            commit
+                .get("files_modified")
+                .and_then(|v| v.as_array())
+                .map(|files| {
+                    !files.is_empty()
+                        && files
+                            .iter()
+                            .all(|f| f.as_str().unwrap_or("").starts_with("src/market/"))
+                })
+                .unwrap_or(false)
+        }));
+    }
+
+    #[test]
+    fn test_handle_git_tools_scoped_subpath_smoke() {
+        let (server, _temp_dir, scope_path) = create_git_scoped_test_server();
+
+        for tool in ["ownership", "hotspot", "defect"] {
+            let params = json!({
+                "name": tool,
+                "arguments": {"path": scope_path.to_str().unwrap()}
+            });
+            let result = server.handle_tool_call(Some(params));
+            assert!(result.is_ok(), "{tool} should succeed for scoped path");
+
+            let payload = extract_tool_payload(result.unwrap());
+            match tool {
+                "ownership" => {
+                    let files = payload
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .expect("ownership payload should include files");
+                    assert!(files.iter().all(|f| {
+                        f.get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .starts_with("src/market/")
+                    }));
+                }
+                "hotspot" => {
+                    let hotspots = payload
+                        .get("hotspots")
+                        .and_then(|v| v.as_array())
+                        .expect("hotspot payload should include hotspots");
+                    assert!(hotspots.iter().all(|h| {
+                        h.get("file")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .starts_with("src/market/")
+                    }));
+                }
+                "defect" => {
+                    let files = payload
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .expect("defect payload should include files");
+                    assert!(files.iter().all(|f| {
+                        f.get("file_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .starts_with("src/market/")
+                    }));
+                }
+                _ => unreachable!("unexpected tool"),
+            }
+        }
     }
 
     #[test]
