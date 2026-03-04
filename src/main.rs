@@ -1116,11 +1116,13 @@ fn run_search(
 ) -> omen::core::Result<()> {
     use omen::semantic::{SearchConfig, SemanticSearch};
 
-    let search_config = SearchConfig::default();
-    let search = SemanticSearch::new(&search_config, path)?;
-
     match subcommand {
         SearchSubcommand::Index(args) => {
+            let search_config = SearchConfig {
+                min_score: config.semantic_search.min_score,
+                ..SearchConfig::default()
+            };
+            let search = SemanticSearch::new(&search_config, path)?;
             let index_scope = args.files.as_deref();
             if args.force {
                 // Remove existing cache
@@ -1153,6 +1155,12 @@ fn run_search(
             }
         }
         SearchSubcommand::Query(args) => {
+            let min_score = args.min_score.unwrap_or(config.semantic_search.min_score);
+            let search_config = SearchConfig {
+                min_score,
+                ..SearchConfig::default()
+            };
+            let search = SemanticSearch::new(&search_config, path)?;
             let file_filter: Option<Vec<&str>> =
                 args.files.as_ref().map(|f| f.split(',').collect());
 
@@ -1171,7 +1179,7 @@ fn run_search(
                     &all_projects,
                     &args.query,
                     args.top_k,
-                    args.min_score,
+                    min_score,
                 )?;
                 omen::semantic::SearchOutput::new(args.query.clone(), mr.total_symbols, mr.results)
             } else if let Some(files) = file_filter {
@@ -1184,7 +1192,7 @@ fn run_search(
             let filtered_results: Vec<_> = output
                 .results
                 .into_iter()
-                .filter(|r| r.score >= args.min_score)
+                .filter(|r| r.score >= min_score)
                 .collect();
 
             let output = omen::semantic::SearchOutput::new(

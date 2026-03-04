@@ -39,6 +39,8 @@ pub struct Config {
     pub exclude_built_assets: bool,
     /// Changes/JIT analyzer configuration.
     pub changes: ChangesConfig,
+    /// Semantic search configuration.
+    pub semantic_search: SemanticSearchConfig,
 }
 
 impl Default for Config {
@@ -56,6 +58,7 @@ impl Default for Config {
             output: OutputConfig::default(),
             exclude_built_assets: true,
             changes: ChangesConfig::default(),
+            semantic_search: SemanticSearchConfig::default(),
         }
     }
 }
@@ -316,6 +319,20 @@ impl Default for ChangesConfig {
     }
 }
 
+/// Semantic search configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SemanticSearchConfig {
+    /// Minimum similarity score (0.0-1.0) used when not provided by caller.
+    pub min_score: f32,
+}
+
+impl Default for SemanticSearchConfig {
+    fn default() -> Self {
+        Self { min_score: 0.3 }
+    }
+}
+
 /// Output format.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -353,6 +370,7 @@ mod tests {
         assert_eq!(config.complexity.cyclomatic_warn, 10);
         assert_eq!(config.churn.top, 20);
         assert!(config.exclude_built_assets);
+        assert!((config.semantic_search.min_score - 0.3).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -406,6 +424,16 @@ mod tests {
             let config = Config::from_file("omen.toml").unwrap();
             assert_eq!(config.complexity.cyclomatic_warn, 15);
             assert_eq!(config.complexity.cyclomatic_error, 25);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_config_from_file_semantic_search_min_score() {
+        Jail::expect_with(|jail| {
+            jail.create_file("omen.toml", "[semantic_search]\nmin_score = 0.05")?;
+            let config = Config::from_file("omen.toml").unwrap();
+            assert!((config.semantic_search.min_score - 0.05).abs() < 0.0001);
             Ok(())
         });
     }
@@ -484,6 +512,16 @@ mod tests {
             jail.set_env("OMEN_COMPLEXITY__CYCLOMATIC_WARN", "42");
             let config = Config::load_default(".").unwrap();
             assert_eq!(config.complexity.cyclomatic_warn, 42);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_env_var_overrides_semantic_search_min_score() {
+        Jail::expect_with(|jail| {
+            jail.set_env("OMEN_SEMANTIC_SEARCH__MIN_SCORE", "0.05");
+            let config = Config::load_default(".").unwrap();
+            assert!((config.semantic_search.min_score - 0.05).abs() < 0.0001);
             Ok(())
         });
     }
