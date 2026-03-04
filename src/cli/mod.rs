@@ -440,8 +440,8 @@ pub struct SearchQueryArgs {
     pub top_k: usize,
 
     /// Minimum similarity score (0.0-1.0)
-    #[arg(long, default_value = "0.3")]
-    pub min_score: f32,
+    #[arg(long)]
+    pub min_score: Option<f32>,
 
     /// Limit search to specific files (comma-separated)
     #[arg(long)]
@@ -1395,7 +1395,16 @@ mod tests {
         if let SearchSubcommand::Query(args) =
             parse_search_subcommand(&["omen", "search", "query", "test", "--min-score", "0.5"])
         {
-            assert!((args.min_score - 0.5).abs() < 0.001);
+            assert_eq!(args.min_score, Some(0.5));
+        }
+    }
+
+    #[test]
+    fn test_search_query_default_min_score_is_none() {
+        if let SearchSubcommand::Query(args) =
+            parse_search_subcommand(&["omen", "search", "query", "test"])
+        {
+            assert_eq!(args.min_score, None);
         }
     }
 

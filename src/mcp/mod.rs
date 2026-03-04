@@ -368,7 +368,7 @@ impl McpServer {
                             "path": {"type": "string", "description": "Project root path (defaults to MCP server root)"},
                             "query": {"type": "string", "description": "Natural language search query"},
                             "top_k": {"type": "integer", "description": "Maximum number of results (default: 10)"},
-                            "min_score": {"type": "number", "description": "Minimum similarity score 0-1 (default: 0.3)"},
+                            "min_score": {"type": "number", "description": "Minimum similarity score 0-1 (default from config; fallback 0.3)"},
                             "files": {"type": "string", "description": "Comma-separated file paths to search within"},
                             "max_complexity": {"type": "integer", "description": "Exclude symbols with cyclomatic complexity above this value"},
                             "include_projects": {"type": "string", "description": "Comma-separated paths to additional project roots for cross-repo search"}
@@ -386,7 +386,7 @@ impl McpServer {
                             "hypothetical_document": {"type": "string", "description": "A code snippet resembling the code you want to find"},
                             "query": {"type": "string", "description": "Original query for display purposes"},
                             "top_k": {"type": "integer", "description": "Maximum number of results (default: 10)"},
-                            "min_score": {"type": "number", "description": "Minimum similarity score 0-1 (default: 0.3)"},
+                            "min_score": {"type": "number", "description": "Minimum similarity score 0-1 (default from config; fallback 0.3)"},
                             "files": {"type": "string", "description": "Comma-separated file paths to search within"},
                             "max_complexity": {"type": "integer", "description": "Exclude symbols with cyclomatic complexity above this value"},
                             "include_projects": {"type": "string", "description": "Comma-separated paths to additional project roots for cross-repo search"}
@@ -668,7 +668,7 @@ impl McpServer {
             .get("min_score")
             .and_then(|v| v.as_f64())
             .map(|v| v as f32)
-            .unwrap_or(0.3);
+            .unwrap_or(self.config.semantic_search.min_score);
 
         let max_complexity = arguments
             .get("max_complexity")
@@ -777,7 +777,7 @@ impl McpServer {
             .get("min_score")
             .and_then(|v| v.as_f64())
             .map(|v| v as f32)
-            .unwrap_or(0.3);
+            .unwrap_or(self.config.semantic_search.min_score);
 
         let max_complexity = arguments
             .get("max_complexity")
@@ -2009,6 +2009,53 @@ def logged_in(context):
         );
         let response = result.unwrap();
         assert!(response.get("content").is_some());
+    }
+
+    #[test]
+    fn test_semantic_search_uses_config_default_min_score() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("test.rs"), "fn simple() { return; }\n").unwrap();
+
+        let mut config = Config::default();
+        config.semantic_search.min_score = 1.0;
+        let server = McpServer::new(temp_dir.path().to_path_buf(), config);
+
+        let default_params = json!({
+            "name": "semantic_search",
+            "arguments": {
+                "query": "simple"
+            }
+        });
+        let default_response = server
+            .handle_tool_call(Some(default_params))
+            .expect("semantic_search without min_score should succeed");
+        let default_payload = extract_tool_payload(default_response);
+        let default_results = default_payload["results"]
+            .as_array()
+            .expect("semantic_search results should be an array");
+        assert!(
+            default_results.is_empty(),
+            "expected config default min_score=1.0 to filter out results, got: {default_payload}"
+        );
+
+        let override_params = json!({
+            "name": "semantic_search",
+            "arguments": {
+                "query": "simple",
+                "min_score": 0.0
+            }
+        });
+        let override_response = server
+            .handle_tool_call(Some(override_params))
+            .expect("semantic_search with explicit min_score should succeed");
+        let override_payload = extract_tool_payload(override_response);
+        let override_results = override_payload["results"]
+            .as_array()
+            .expect("semantic_search results should be an array");
+        assert!(
+            !override_results.is_empty(),
+            "explicit min_score should override config default, got: {override_payload}"
+        );
     }
 
     #[test]

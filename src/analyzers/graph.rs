@@ -1540,4 +1540,74 @@ mod tests {
             Some("src/vivasvan/__init__.py".to_string())
         );
     }
+
+    #[test]
+    fn test_analyze_files_python_future_import_not_included_when_external_disabled() {
+        use crate::config::Config as AppConfig;
+        use crate::core::FileSet;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let worker_path = temp_dir
+            .path()
+            .join("src/vivasvan/trading/strategy_evaluator/entrypoints/worker.py");
+        let config_path = temp_dir
+            .path()
+            .join("src/vivasvan/trading/strategy_evaluator/shared/config.py");
+
+        std::fs::create_dir_all(worker_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &worker_path,
+            r#"from __future__ import annotations
+from vivasvan.trading.strategy_evaluator.shared.config import load_config
+
+def run():
+    return load_config()
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &config_path,
+            r#"def load_config():
+    return {}
+"#,
+        )
+        .unwrap();
+
+        let app_config = AppConfig::default();
+        let file_set = FileSet::from_path(temp_dir.path(), &app_config).unwrap();
+        let ctx = AnalysisContext::new(&file_set, &app_config, Some(temp_dir.path()));
+
+        let analyzer = Analyzer::with_config(Config {
+            include_external: false,
+            ..Config::default()
+        });
+        let analysis = analyzer.analyze_files(&ctx).unwrap();
+
+        let worker_rel = "src/vivasvan/trading/strategy_evaluator/entrypoints/worker.py";
+        let config_rel = "src/vivasvan/trading/strategy_evaluator/shared/config.py";
+
+        assert!(analysis.nodes.iter().any(|n| n.path == worker_rel));
+        assert!(analysis.nodes.iter().any(|n| n.path == config_rel));
+        assert!(
+            analysis
+                .edges
+                .iter()
+                .any(|e| e.from == worker_rel && e.to == config_rel),
+            "expected internal import edge from worker.py to shared/config.py, got edges: {:?}",
+            analysis.edges
+        );
+        assert!(
+            analysis.nodes.iter().all(|n| n.path != "__future__"),
+            "__future__ should not be materialized as a graph node when include_external=false"
+        );
+        assert!(
+            analysis
+                .edges
+                .iter()
+                .all(|e| e.from != "__future__" && e.to != "__future__"),
+            "__future__ should not participate in graph edges when include_external=false"
+        );
+    }
 }

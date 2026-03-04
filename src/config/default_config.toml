@@ -55,6 +55,10 @@ stale_days = 90
 # Available: launchdarkly, flipper, split, unleash, generic, env
 providers = []
 
+[semantic_search]
+# Minimum similarity score (0.0-1.0) used when not passed explicitly
+min_score = 0.3
+
 [output]
 format = "text"
 color = true

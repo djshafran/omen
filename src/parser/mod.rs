@@ -1092,32 +1092,27 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_python_imports_from_vivasvan() {
-        use std::path::Path;
-
-        let path =
-            Path::new("/home/ivan/app/trader-core/vivasvan/src/vivasvan/trading/strategy_evaluator/entrypoints/worker.py");
-        let source = std::fs::read(path).expect("failed to read test fixture");
+    fn test_extract_python_imports_vivasvan_like_hermetic() {
         let parser = Parser::new();
+        let path = Path::new("src/vivasvan/trading/strategy_evaluator/entrypoints/worker.py");
+        let source = b"from vivasvan.trading.strategy_evaluator import runner as strategy_runner
+from vivasvan.trading.strategy_evaluator.entrypoints import worker
+from .shared import config as cfg
+from ..state import store
+";
         let result = parser
-            .parse(&source, Language::Python, path)
+            .parse(source, Language::Python, path)
             .expect("parse failed");
         let imports = extract_imports(&result);
         let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
 
-        assert!(!imports.is_empty(), "no imports found in {:?}", path);
-        assert!(
-            paths
-                .iter()
-                .any(|path| path.contains("vivasvan.trading.strategy_evaluator")),
-            "imports={:?}",
-            paths
-        );
-        assert!(
-            !paths.iter().any(|path| path == &"__future__"),
-            "future import should not stay in internal dependency set; {:?}",
-            paths
-        );
+        assert_eq!(imports.len(), 6);
+        assert!(paths.contains(&"vivasvan.trading.strategy_evaluator"));
+        assert!(paths.contains(&"vivasvan.trading.strategy_evaluator.entrypoints"));
+        assert!(paths.contains(&".shared"));
+        assert!(paths.contains(&".shared.config"));
+        assert!(paths.contains(&"..state"));
+        assert!(paths.contains(&"..state.store"));
     }
 
     #[test]
