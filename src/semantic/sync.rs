@@ -282,16 +282,14 @@ fn parse_file(path: &Path, root_path: &Path) -> Result<ParsedFile> {
             let enriched_text = format_chunk_text(chunk);
             let content_hash = hash_string(&enriched_text);
 
-            // Look up complexity from the original function. Match by name
-            // and verify the chunk falls within the function's line range.
-            // Use the tightest (smallest) enclosing range to handle nested
-            // same-name functions correctly.
+            // Look up complexity from the original function by containment.
+            // This supports both function chunks and synthetic branch chunks,
+            // and uses the tightest (smallest) enclosing range to handle
+            // nested functions correctly.
             let complexity = complexity_entries
                 .iter()
-                .filter(|(name, start, end, _, _)| {
-                    name == &chunk.symbol_name
-                        && chunk.start_line >= *start
-                        && chunk.start_line <= *end
+                .filter(|(_, start, end, _, _)| {
+                    chunk.start_line >= *start && chunk.start_line <= *end
                 })
                 .min_by_key(|(_, start, end, _, _)| end - start)
                 .map(|(_, _, _, cyc, cog)| (*cyc, *cog));
@@ -393,6 +391,16 @@ mod tests {
         assert!(branchy.cyclomatic_complexity.is_some());
         // branchy() has 2 if-branches -> cyclomatic >= 3
         assert!(branchy.cyclomatic_complexity.unwrap() >= 3);
+
+        let branch_symbol = parsed
+            .chunks
+            .iter()
+            .find(|c| c.symbol_type == "branch")
+            .expect("should extract branch symbol");
+        assert!(
+            branch_symbol.cyclomatic_complexity.is_some(),
+            "branch symbol should inherit enclosing function complexity"
+        );
     }
 
     #[test]

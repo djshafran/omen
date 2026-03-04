@@ -395,6 +395,57 @@ mod tests {
     }
 
     #[test]
+    fn test_search_keeps_branch_symbols_in_results() {
+        let cache = EmbeddingCache::in_memory().unwrap();
+
+        cache
+            .upsert_symbol(&CachedSymbol {
+                file_path: "src/lib.rs".to_string(),
+                symbol_name: "process".to_string(),
+                symbol_type: "function".to_string(),
+                parent_name: None,
+                signature: "fn process()".to_string(),
+                start_line: 1,
+                end_line: 12,
+                chunk_index: 0,
+                total_chunks: 1,
+                content_hash: "f1".to_string(),
+                enriched_text: "[src/lib.rs] process\nfn process() { do_work(); }".to_string(),
+                cyclomatic_complexity: Some(3),
+                cognitive_complexity: Some(2),
+            })
+            .unwrap();
+
+        cache
+            .upsert_symbol(&CachedSymbol {
+                file_path: "src/lib.rs".to_string(),
+                symbol_name: "process::if_statement:4-8".to_string(),
+                symbol_type: "branch".to_string(),
+                parent_name: None,
+                signature: "fn process() [branch:if_statement]".to_string(),
+                start_line: 4,
+                end_line: 8,
+                chunk_index: 0,
+                total_chunks: 1,
+                content_hash: "b1".to_string(),
+                enriched_text:
+                    "[src/lib.rs] process::if_statement:4-8 [branch]\nif retries > 3 { return Err(e); }"
+                        .to_string(),
+                cyclomatic_complexity: Some(3),
+                cognitive_complexity: Some(2),
+            })
+            .unwrap();
+
+        let engine = SearchEngine::new(&cache);
+        let results = engine.search("retries return err", 10).unwrap();
+
+        assert!(
+            results.iter().any(|r| r.symbol_type == "branch"),
+            "branch symbols should participate in search output"
+        );
+    }
+
+    #[test]
     fn test_search_filtered_by_complexity() {
         let cache = EmbeddingCache::in_memory().unwrap();
 

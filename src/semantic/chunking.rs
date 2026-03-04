@@ -3,6 +3,8 @@
 //! Splits long functions at statement boundaries so each chunk has focused
 //! vocabulary for better TF-IDF relevance. Short functions remain as single
 //! chunks. Each chunk carries its parent type (class/struct/impl) when applicable.
+//! AST control-flow branches inside function bodies are also extracted as
+//! standalone `branch` symbols.
 
 use crate::core::Language;
 use crate::parser::{FunctionNode, ParseResult};
@@ -86,9 +88,139 @@ pub fn extract_chunks(
                 });
             }
         }
+
+        all_chunks.extend(extract_branch_chunks(
+            parse_result,
+            func,
+            rel_path,
+            parent_name,
+        ));
     }
 
     all_chunks
+}
+
+#[derive(Debug, Clone)]
+struct BranchChunkData {
+    kind: String,
+    content: String,
+    start_line: u32,
+    end_line: u32,
+    start_byte: usize,
+}
+
+fn extract_branch_chunks(
+    parse_result: &ParseResult,
+    func: &FunctionNode,
+    rel_path: &str,
+    parent_name: Option<String>,
+) -> Vec<Chunk> {
+    let Some((body_start, body_end)) = func.body_byte_range else {
+        return Vec::new();
+    };
+
+    let branch_kinds = get_branch_node_kinds(parse_result.language);
+    if branch_kinds.is_empty() {
+        return Vec::new();
+    }
+
+    let mut branches = Vec::new();
+    collect_branch_nodes(
+        parse_result.root_node(),
+        &parse_result.source,
+        body_start,
+        body_end,
+        &branch_kinds,
+        &mut branches,
+    );
+
+    branches.sort_by_key(|b| b.start_byte);
+
+    branches
+        .into_iter()
+        .map(|branch| {
+            let symbol_name = format!(
+                "{}::{}:{}-{}",
+                func.name, branch.kind, branch.start_line, branch.end_line
+            );
+
+            Chunk {
+                file_path: rel_path.to_string(),
+                symbol_name,
+                symbol_type: "branch".to_string(),
+                parent_name: parent_name.clone(),
+                signature: format!("{} [branch:{}]", func.signature, branch.kind),
+                content: branch.content,
+                start_line: branch.start_line,
+                end_line: branch.end_line,
+                chunk_index: 0,
+                total_chunks: 1,
+            }
+        })
+        .collect()
+}
+
+fn collect_branch_nodes(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    body_start: usize,
+    body_end: usize,
+    branch_kinds: &[&str],
+    out: &mut Vec<BranchChunkData>,
+) {
+    if node.end_byte() <= body_start || node.start_byte() >= body_end {
+        return;
+    }
+
+    let inside_body = node.start_byte() >= body_start && node.end_byte() <= body_end;
+
+    if inside_body && branch_kinds.contains(&node.kind()) {
+        if let Ok(text) = node.utf8_text(source) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                out.push(BranchChunkData {
+                    kind: node.kind().to_string(),
+                    content: trimmed.to_string(),
+                    start_line: node.start_position().row as u32 + 1,
+                    end_line: node.end_position().row as u32 + 1,
+                    start_byte: node.start_byte(),
+                });
+            }
+        }
+    }
+
+    // Avoid attributing branches from nested scopes (nested defs/classes/etc.)
+    // to the outer function.
+    if inside_body && is_nested_scope_node(node.kind()) {
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_branch_nodes(child, source, body_start, body_end, branch_kinds, out);
+    }
+}
+
+fn is_nested_scope_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_definition"
+            | "function_declaration"
+            | "method_declaration"
+            | "function_item"
+            | "method_definition"
+            | "arrow_function"
+            | "constructor_declaration"
+            | "lambda"
+            | "method"
+            | "singleton_method"
+            | "decorated_definition"
+            | "class_definition"
+            | "class_declaration"
+            | "struct_item"
+            | "impl_item"
+            | "trait_item"
+    )
 }
 
 /// A parent type span (class/struct/impl).
@@ -163,6 +295,80 @@ fn get_type_node_kinds(lang: Language) -> Vec<&'static str> {
         Language::Ruby => vec!["class", "module"],
         Language::Php => vec!["class_declaration", "interface_declaration"],
         Language::Bash => vec![],
+        Language::Gherkin => vec![],
+    }
+}
+
+fn get_branch_node_kinds(lang: Language) -> Vec<&'static str> {
+    match lang {
+        Language::Rust => vec![
+            "if_expression",
+            "match_expression",
+            "for_expression",
+            "while_expression",
+            "loop_expression",
+        ],
+        Language::Go => vec![
+            "if_statement",
+            "for_statement",
+            "expression_switch_statement",
+            "type_switch_statement",
+            "select_statement",
+        ],
+        Language::Python => vec![
+            "if_statement",
+            "for_statement",
+            "while_statement",
+            "try_statement",
+            "with_statement",
+            "match_statement",
+        ],
+        Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx => vec![
+            "if_statement",
+            "switch_statement",
+            "for_statement",
+            "for_in_statement",
+            "for_of_statement",
+            "while_statement",
+            "do_statement",
+            "try_statement",
+        ],
+        Language::Java => vec![
+            "if_statement",
+            "switch_statement",
+            "for_statement",
+            "enhanced_for_statement",
+            "while_statement",
+            "do_statement",
+            "try_statement",
+        ],
+        Language::CSharp => vec![
+            "if_statement",
+            "switch_statement",
+            "for_statement",
+            "foreach_statement",
+            "while_statement",
+            "do_statement",
+            "try_statement",
+        ],
+        Language::C | Language::Cpp => vec![
+            "if_statement",
+            "switch_statement",
+            "for_statement",
+            "while_statement",
+            "do_statement",
+        ],
+        Language::Ruby => vec!["if", "unless", "case", "for", "while", "until", "begin"],
+        Language::Php => vec![
+            "if_statement",
+            "switch_statement",
+            "for_statement",
+            "foreach_statement",
+            "while_statement",
+            "do_statement",
+            "try_statement",
+        ],
+        Language::Bash => vec!["if_statement", "for_statement", "while_statement", "case_statement"],
         Language::Gherkin => vec![],
     }
 }
@@ -269,9 +475,20 @@ pub fn format_chunk_text(chunk: &Chunk) -> String {
         String::new()
     };
 
+    let type_suffix = if chunk.symbol_type == "branch" {
+        " [branch]"
+    } else {
+        ""
+    };
+
     format!(
-        "[{}] {}{}{}\n{}",
-        chunk.file_path, parent_prefix, chunk.symbol_name, chunk_suffix, chunk.content
+        "[{}] {}{}{}{}\n{}",
+        chunk.file_path,
+        parent_prefix,
+        chunk.symbol_name,
+        chunk_suffix,
+        type_suffix,
+        chunk.content
     )
 }
 
@@ -410,6 +627,25 @@ mod tests {
 
         let text = format_chunk_text(&chunk);
         assert!(text.starts_with("[src/lib.rs] Foo::bar (2/3)\n"));
+    }
+
+    #[test]
+    fn test_format_chunk_text_branch_suffix() {
+        let chunk = Chunk {
+            file_path: "src/lib.rs".to_string(),
+            symbol_name: "foo::if_statement:10-14".to_string(),
+            symbol_type: "branch".to_string(),
+            parent_name: None,
+            signature: "fn foo() [branch:if_statement]".to_string(),
+            content: "if x > 0 { return; }".to_string(),
+            start_line: 10,
+            end_line: 14,
+            chunk_index: 0,
+            total_chunks: 1,
+        };
+
+        let text = format_chunk_text(&chunk);
+        assert!(text.starts_with("[src/lib.rs] foo::if_statement:10-14 [branch]\n"));
     }
 
     #[test]
@@ -627,6 +863,31 @@ mod tests {
         };
         let chunks = extract_chunks(&pr, &[func], "test.sh");
         assert!(chunks[0].parent_name.is_none());
+    }
+
+    #[test]
+    fn test_extract_python_branch_chunks() {
+        let source = b"def process(x):\n    if x > 0:\n        return x\n    return 0\n";
+        let pr = parse_lang(source, Language::Python);
+        let funcs = crate::parser::extract_functions(&pr);
+        assert_eq!(funcs.len(), 1);
+
+        let chunks = extract_chunks(&pr, &funcs, "test.py");
+        assert!(chunks.iter().any(|c| c.symbol_type == "function"));
+
+        let branch = chunks
+            .iter()
+            .find(|c| c.symbol_type == "branch" && c.symbol_name.contains("if_statement"))
+            .expect("expected an if_statement branch chunk");
+        assert!(branch.content.contains("if x > 0"));
+        assert!(branch.signature.contains("[branch:if_statement]"));
+    }
+
+    #[test]
+    fn test_branch_kinds_python_not_empty() {
+        let branch_kinds = get_branch_node_kinds(Language::Python);
+        assert!(branch_kinds.contains(&"if_statement"));
+        assert!(branch_kinds.contains(&"try_statement"));
     }
 
     #[test]
