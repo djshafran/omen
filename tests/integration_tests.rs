@@ -683,6 +683,153 @@ fn test_satd_detects_todo_in_python() {
 }
 
 // ---------------------------------------------------------------------------
+// Semantic search E2E tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_semantic_search_python_e2e_branch_and_complexity_metrics() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    std::fs::write(
+        temp_dir.path().join("sample.py"),
+        r#"def process(items):
+    for item in items:
+        if item.retries > 3:
+            raise ValueError("too many retries")
+    return True
+"#,
+    )
+    .expect("write sample.py");
+
+    omen()
+        .args(["-p", temp_dir.path().to_str().unwrap(), "search", "index"])
+        .assert()
+        .success();
+
+    let search_output = omen()
+        .args([
+            "-p",
+            temp_dir.path().to_str().unwrap(),
+            "-f",
+            "json",
+            "search",
+            "query",
+            "too many retries",
+            "--top-k",
+            "10",
+            "--min-score",
+            "0.0",
+        ])
+        .output()
+        .expect("search query runs");
+    assert!(
+        search_output.status.success(),
+        "search query should succeed: {}",
+        String::from_utf8_lossy(&search_output.stderr)
+    );
+
+    let search_stdout = String::from_utf8_lossy(&search_output.stdout);
+    let search_json: serde_json::Value =
+        serde_json::from_str(&search_stdout).expect("search query output should be valid JSON");
+    let results = search_json["results"]
+        .as_array()
+        .expect("results should be an array");
+    assert!(
+        !results.is_empty(),
+        "expected semantic search results, got: {}",
+        search_stdout
+    );
+
+    let function_result = results
+        .iter()
+        .find(|r| r["symbol_type"] == "function" && r["symbol_name"] == "process")
+        .expect("expected function result for process");
+
+    let function_cyclomatic = function_result["cyclomatic_complexity"]
+        .as_u64()
+        .expect("function cyclomatic_complexity should be present");
+    let function_cognitive = function_result["cognitive_complexity"]
+        .as_u64()
+        .expect("function cognitive_complexity should be present");
+    assert_eq!(function_result["start_line"].as_u64(), Some(1));
+    assert_eq!(function_result["end_line"].as_u64(), Some(5));
+
+    let branch_results: Vec<&serde_json::Value> = results
+        .iter()
+        .filter(|r| r["symbol_type"] == "branch")
+        .collect();
+    assert!(
+        !branch_results.is_empty(),
+        "expected at least one branch result, got: {}",
+        search_stdout
+    );
+
+    for branch in &branch_results {
+        assert_eq!(
+            branch["cyclomatic_complexity"].as_u64(),
+            Some(function_cyclomatic),
+            "branch should inherit function cyclomatic complexity"
+        );
+        assert_eq!(
+            branch["cognitive_complexity"].as_u64(),
+            Some(function_cognitive),
+            "branch should inherit function cognitive complexity"
+        );
+        let signature = branch["signature"].as_str().unwrap_or("");
+        assert!(
+            signature.contains("[branch:"),
+            "branch signature should contain branch marker, got: {signature}"
+        );
+    }
+
+    let complexity_output = omen()
+        .args([
+            "-p",
+            temp_dir.path().to_str().unwrap(),
+            "-f",
+            "json",
+            "complexity",
+        ])
+        .output()
+        .expect("complexity runs");
+    assert!(
+        complexity_output.status.success(),
+        "complexity should succeed: {}",
+        String::from_utf8_lossy(&complexity_output.stderr)
+    );
+
+    let complexity_stdout = String::from_utf8_lossy(&complexity_output.stdout);
+    let complexity_json: serde_json::Value =
+        serde_json::from_str(&complexity_stdout).expect("complexity output should be valid JSON");
+
+    let files = complexity_json["files"]
+        .as_array()
+        .expect("complexity files should be an array");
+    let mut baseline_cyclomatic = None;
+    let mut baseline_cognitive = None;
+    for file in files {
+        if let Some(functions) = file["functions"].as_array() {
+            for function in functions {
+                if function["name"] == "process" {
+                    baseline_cyclomatic = function["metrics"]["cyclomatic"].as_u64();
+                    baseline_cognitive = function["metrics"]["cognitive"].as_u64();
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        baseline_cyclomatic,
+        Some(function_cyclomatic),
+        "semantic_search function cyclomatic should match complexity analyzer"
+    );
+    assert_eq!(
+        baseline_cognitive,
+        Some(function_cognitive),
+        "semantic_search function cognitive should match complexity analyzer"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Error handling tests
 // ---------------------------------------------------------------------------
 
