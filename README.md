@@ -1034,7 +1034,7 @@ Customize label naming with `label-template`. The `{{level}}` token is replaced 
 
 ## MCP Server
 
-Omen includes a Model Context Protocol (MCP) server that exposes all analyzers as tools for LLMs like Claude. This enables AI assistants to analyze codebases directly.
+Omen includes a Model Context Protocol (MCP) server that exposes all analyzers as tools for LLMs like Claude and Codex. This enables AI assistants to analyze codebases directly.
 
 ### Claude Desktop
 
@@ -1056,6 +1056,43 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 ```bash
 claude mcp add omen -- omen mcp
 ```
+
+### Codex
+
+Add to your Codex MCP config:
+
+```toml
+[mcp_servers.omen-project]
+cwd = "/path/to/repo"
+command = "omen"
+args = [
+  "--path", "/path/to/repo",
+  "--config", "/path/to/repo/omen.toml",
+  "--jobs", "24",
+  "mcp",
+]
+tool_timeout_sec = 6000
+startup_timeout_sec = 30
+```
+
+> [!IMPORTANT]
+> `--path` defines the MCP server root. Tools that do not receive an explicit `path` use this root, and semantic search stores its cache in `<path>/.omen/search.db`.
+>
+> Build the search index with the same root that Codex passes to `--path`:
+>
+> ```bash
+> omen --path "/path/to/repo" --config "/path/to/repo/omen.toml" --jobs 24 search index
+> ```
+>
+> If you start the MCP server with `--path "/path/to/repo"` but index `"/path/to/repo/src"`, Omen will treat them as different roots and will not reuse `"/path/to/repo/src/.omen/search.db"`.
+>
+> If you want to scope MCP to a subdirectory, keep the paths aligned in both places:
+>
+> ```bash
+> omen --path "/path/to/repo/src" --config "/path/to/repo/omen.toml" --jobs 24 search index
+> ```
+>
+> `cwd` is best set to the repository root, especially for git-backed analyzers. Relative `path` arguments sent through MCP are resolved from `--path`, and when `--config` is omitted Omen looks for `omen.toml` or `.omen/omen.toml` under `--path`, not under `cwd`.
 
 ### Example Usage
 
